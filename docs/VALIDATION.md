@@ -1,4 +1,33 @@
-# Version 0.3.1 correction validation — 11 October 2026
+# Version 0.3.2 camera-silence diagnosis — 11 October 2026
+
+The user reports keyboard demo sound works while camera mode remains silent,
+including a displayed note and lit BOW meter. This narrows the problem to the
+camera control/audio-request path; its exact laptop cause remains unresolved.
+
+- **181 automated tests passed**, zero skips, in 3.209 seconds.
+- Camera performance status now names missing hands, unrecognized notes, bow
+  region restrictions, and mode-dependent pinch requirements. Camera Space
+  prints both gesture and callback diagnostics; D shows last audio request
+  gate/age, output peak, and callback count. These are measured runtime values.
+- A zero-intensity meter previously drew a colored one-pixel rectangle. It now
+  draws no active color at zero; a regression checks the actual rendered pixel.
+- An actual synthetic finger controller→mailbox→audio callback regression
+  produces nonzero PCM from an 89 ms-old capture. A controller can still show
+  its gate active at 179 ms while a callback 5 ms later correctly rejects the
+  184 ms-old request. This demonstrates a timing failure mode, not proof that
+  it explains the user's laptop. The safety timeout was not relaxed.
+- Actual performance-strip captures for five blocked/active states and the
+  delayed callback panel were inspected. All use labelled synthetic input;
+  no physical camera, speakers, or Windows session was tested here.
+
+No dependency or calibration changes are required for 0.3.2. The next laptop
+check needs the diagnostic panel/terminal output while camera sound is silent,
+and comparison with LOW/2D/background off. Do not label this a proven musical
+fix until that evidence identifies and verifies the actual cause.
+
+---
+
+# Historical version 0.3.1 correction validation — 11 October 2026
 
 The user's actual screenshot showed a severed neck, unstable proportions, and
 reported both short sound bursts and pitch stuck on D4. This revision addresses

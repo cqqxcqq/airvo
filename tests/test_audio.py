@@ -91,6 +91,38 @@ class AudioTests(unittest.TestCase):
         self.assertTrue(np.all(output == 0))
         self.assertIn("test fault", engine.health.error)
 
+    def test_camera_note_reaches_callback_but_expired_capture_is_silent(self):
+        from dataclasses import replace
+        from unittest.mock import patch
+        from air_violin.config import Calibration, Controls
+        from air_violin.controller import Instrument
+        from air_violin.types import TrackingFrame
+        from tests.helpers import hand
+        from tests.test_fingering import articulated, finger_calibration
+
+        calibration = replace(Calibration(version=2), fingers=finger_calibration(dwell=0))
+        for controller_age, callback_age, should_sound in ((.084, .089, True), (.179, .184, False)):
+            with self.subTest(callback_age=callback_age):
+                instrument = Instrument(calibration, Controls(), 'assisted',
+                                        fingering_mode='fingers', string_override=1)
+                instrument.update(TrackingFrame(10, (articulated(), hand('Right', wrist=(.7, .5)))),
+                                  10 + controller_age)
+                self.assertTrue(instrument.toggle_assisted(10 + controller_age))
+                state = instrument.update(None, 10 + controller_age)
+                self.assertTrue(state.audio.gate)
+                bus = StateBus()
+                bus.publish(state.audio)
+                engine = AudioEngine(bus)
+                output = np.zeros((256, 1), dtype=np.float32)
+                with patch('air_violin.audio.time.perf_counter', return_value=10 + callback_age):
+                    engine._callback(output, 256, None, SimpleNamespace(output_underflow=False))
+                self.assertEqual(engine.last_state, state.audio)
+                self.assertEqual(engine.health.error, '')
+                if should_sound:
+                    self.assertGreater(engine.health.peak, .005)
+                else:
+                    self.assertEqual(engine.health.peak, 0)
+
     def test_low_sample_rate_omits_aliasing_harmonics(self):
         synth = Synthesizer(16000)
         signal = synth.render(16000, AudioState(1, 83, 1, True), 1)

@@ -1,10 +1,15 @@
 # Air Violin Studio — finger-controlled visual studio
 
-A local Python desktop instrument played with two bare hands. Version **0.3.1**
+A local Python desktop instrument played with two bare hands. Version **0.3.2**
 corrects knuckle-based finger detection, adds relaxed assisted sustain, and
 rebuilds the 3D violin with stable size, fuller proportions, and a continuous neck. The audio
 stream, hand tracking, and optional person segmentation run independently of
 stage rendering. No cloud connection is required after installation.
+
+The camera status now explains why a note cannot start: missing hands, unknown
+fingering, wrist outside the bow area, or a pinch stopping Assisted. Pressing
+Space in camera Assisted also prints the status and gesture details in the
+terminal. These messages replace the misleading generic start instruction.
 
 This is a simplified gesture instrument with bowed-string-inspired synthesis.
 The camera estimates finger poses; it does **not** measure finger pressure,
@@ -384,6 +389,19 @@ latency remain manual acceptance work. No guaranteed 30 FPS or sub-100 ms onset
 is claimed.
 
 ## Troubleshooting
+
+If **keyboard demo has sound but camera mode does not**, the output device and
+synthesizer are working. In camera mode, press Space and read the message below
+the note. Assisted needs a recognized left-hand note, fresh tracking of both
+hands, an unpinched right thumb/index, and the wrist inside the bow area to
+start. A 3D violin/bow alone does not prove those musical conditions are met.
+Pinch is **stop** in Assisted and **engage** in Precision; check the displayed
+mode. D shows tracking age plus the audio callback's last request gate, age,
+signal peak and callback count. Space prints numerical gesture/audio diagnostics.
+If the BOW bar is filled but sound is absent, these values distinguish a late
+request rejected by the audio watchdog from a gesture that never starts.
+Share the status or screenshot to identify the blocked step; do not reinstall
+audio dependencies or delete calibration merely because camera playback is silent.
 
 | Symptom | Focused correction |
 | --- | --- |

@@ -46,6 +46,42 @@ def physical_hand_caption(raw_label: str, calibration: Calibration | None) -> st
     return "Unidentified hand"
 
 
+def playback_status(state: MusicalState, calibration: Calibration,
+                    bow_mode: str, demo: bool = False) -> str:
+    """Explain the first unmet playing condition, using musical control state.
+
+    Decorative hand anchors can remain visible while the musical gate is shut.
+    A released voice also retains its last MIDI pitch, so only a recognized
+    finger position establishes that a new camera note is ready to play.
+    """
+    if demo:
+        return ("Keyboard sounding / Space stops" if state.audio.gate
+                else "Space sustains / Enter bows")
+    if not state.left_fresh and not state.right_fresh:
+        return "Show both hands to the camera"
+    if not state.left_fresh:
+        return "Show your left hand to the camera"
+    if not state.right_fresh:
+        return "Show your right hand to the camera"
+    if state.finger is None or state.audio.midi is None:
+        return ("Left note unclear; show fingers" if state.fingering_mode == "fingers"
+                else "Point left index inside note area")
+    if state.audio.gate:
+        return "Sustaining: pinch / Space stops" if state.bow_sustaining else "Bowing"
+    inside = state.wrist is not None and calibration.bow.contains(state.wrist.x, state.wrist.y)
+    if not inside:
+        return "Move right wrist into bow area"
+    if not state.engaged:
+        if bow_mode == "assisted":
+            return ("Try a fresh right-hand stroke" if state.pinch >= calibration.pinch_off
+                    else "Separate right thumb/index")
+        if bow_mode == "precision":
+            return "Pinch right thumb/index to bow"
+        return "Try a fresh right-hand stroke"
+    return ("Short stroke / Space starts" if bow_mode == "assisted"
+            else "Sweep your right hand to bow")
+
+
 class Renderer:
     def __init__(self, scene="studio", custom=None, quality="medium", reduced_motion=False,
                  background=True, blur=False, effect_intensity=.65, confidence=.65, timeout=.18):
@@ -214,16 +250,13 @@ class Renderer:
             text(output, note_name(selected), 35, 605, .90, color, 2)
             label = (f"{STRINGS[state.string]} string / " + ("open" if state.zone == 0 else f"finger {state.zone}")) if finger_mode else f"{STRINGS[state.string]} string"
             text(output, label if selected is not None else "Show your left fingers" if finger_mode else "Left index: choose a note", 124, 589, .43)
-            status = ("Sustaining: pinch / Space stops" if state.audio.gate and state.bow_sustaining
-                      else "Bowing" if state.audio.gate
-                      else "Short stroke / Space starts" if selected is not None and bow_mode == "assisted" and not demo
-                      else "Sweep your right hand to bow" if selected is not None and not demo
-                      else "Space sustains / Enter bows" if demo
-                      else "Keep all four fingers visible" if finger_mode else "Ready to play")
+            status = playback_status(state, calibration, bow_mode, demo)
             text(output, status, 124, 612, .41, (185, 220, 220))
             text(output, "BOW", 435, 590, .36)
             cv2.rectangle(output, (480, 582), (590, 590), (60, 57, 52), -1)
-            cv2.rectangle(output, (480, 582), (480 + int(110 * state.audio.intensity), 590), color, -1)
+            bow_width = int(110 * state.audio.intensity) if state.audio.gate else 0
+            if bow_width > 0:
+                cv2.rectangle(output, (480, 582), (480 + bow_width, 590), color, -1)
             text(output, f"{bow_mode.upper()}  |  Volume {state.audio.volume:.0%}", 435, 611, .35)
             if finger_mode:
                 for i, value in enumerate(state.finger_states):
@@ -265,7 +298,14 @@ class Renderer:
             text(output, "K keyboard demo   Q quit", 156, 370, .40)
         if notice:
             text(output, notice[:115], 22, 675 if self.debug else 661, .35, (132, 183, 255))
-        text(output, "H help  J fingering  S scene  V background  D debug  F fullscreen  C calibrate  Q quit", 22, 693, .39)
+        if self.debug:
+            callbacks = audio.health.callbacks
+            request_age = max(0., (time.perf_counter() - audio.last_state.timestamp) * 1000) if callbacks else None
+            age_label = f"{request_age:.0f}ms" if request_age is not None else "--"
+            text(output, f"Audio requests {callbacks}  gate {'on' if audio.last_state.gate else 'off'}  age {age_label}  peak {audio.health.peak:.4f}",
+                 22, 692, .36, (185, 220, 220))
+        else:
+            text(output, "H help  J fingering  S scene  V background  D debug  F fullscreen  C calibrate  Q quit", 22, 693, .39)
         if help_visible:
             cv2.rectangle(output, (65, 145), (855, 538), (32, 28, 23), -1)
             lines = ["PLAY YOUR AIR VIOLIN", "Left fingers: lift or curl. Highest finger down selects the note." if finger_mode else "Left INDEX: select string and note. Right WRIST: sweep horizontally.",

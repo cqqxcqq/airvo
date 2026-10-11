@@ -17,7 +17,7 @@ from .config import (Calibration, Controls, FINGER_FEATURE_VERSION,
 from .controller import Instrument
 from .demo import KeyboardInstrument
 from .models import DEFAULT_MODEL, DEFAULT_SEGMENTER, verify_model
-from .render import Renderer, WINDOW
+from .render import Renderer, WINDOW, playback_status
 from .runtime import ControlWorker
 from .scenes import SCENES
 from .segmentation import SegmentationWorker
@@ -407,6 +407,29 @@ def run(args) -> int:
             elif not demo_mode and not wizard and bow_mode == "assisted" and control_worker:
                 if key == ord(" "):
                     control_worker.toggle_assisted()
+                    current = control_worker.latest.get()
+                    if current is not None:
+                        report("Last Space: " + playback_status(current, calibration, bow_mode))
+                        age = (time.perf_counter() - tracking.timestamp) * 1000 if tracking else None
+                        age_text = f"{age:.1f}" if age is not None else "--"
+                        print("Camera sound details: "
+                              f"gate={current.audio.gate} "
+                              f"left_fresh={current.left_fresh} right_fresh={current.right_fresh} "
+                              f"fingers={current.finger_states} "
+                              f"midi={current.audio.midi} intensity={current.audio.intensity:.3f} "
+                              f"volume={current.audio.volume:.3f} "
+                              f"pinch={current.pinch:.3f} "
+                              f"pinch_on={calibration.pinch_on:.3f} pinch_off={calibration.pinch_off:.3f} "
+                              f"tracking_age_ms={age_text}")
+                        request = audio.last_state
+                        request_age = (time.perf_counter() - request.timestamp) * 1000
+                        print("Audio callback details: "
+                              f"callbacks={audio.health.callbacks} "
+                              f"gate={request.gate} midi={request.midi} "
+                              f"request_age_ms={request_age:.1f} timeout_ms={audio.synth.timeout * 1000:.0f} "
+                              f"intensity={request.intensity:.3f} volume={request.volume:.3f} "
+                              f"peak={audio.health.peak:.4f} underruns={audio.health.underruns} "
+                              f"error={audio.health.error or 'none'}")
                 elif key == ord("0"):
                     control_worker.stop_assisted()
             elif demo_mode:
