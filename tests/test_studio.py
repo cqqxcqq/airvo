@@ -237,7 +237,7 @@ class ControlThreadTests(unittest.TestCase):
         vision = SimpleNamespace(latest=LatestValue(), ready=True, error='', close=unittest.mock.Mock())
         segmentation = SimpleNamespace(latest=LatestValue(), error='', configure=unittest.mock.Mock(), close=unittest.mock.Mock(), throttled=False)
         worker = SimpleNamespace(latest=LatestValue(), error='synthetic control failure', configure=unittest.mock.Mock(), close=unittest.mock.Mock())
-        args = app.parser().parse_args(['--silent'])
+        args = app.parser().parse_args(['--silent', '--renderer', '2d', '--fingering', 'pointing'])
         warnings = io.StringIO()
         with (patch.dict('os.environ', {'DISPLAY': ':test'}),
               patch.object(app, 'load_calibration', return_value=Calibration()),
@@ -283,7 +283,7 @@ class ControlThreadTests(unittest.TestCase):
             vision.latest.put(synthetic_frame(now, 1, 2))
             return next(keys)
         with tempfile.TemporaryDirectory() as folder:
-            args = app.parser().parse_args(['--silent'])
+            args = app.parser().parse_args(['--silent', '--renderer', '2d', '--fingering', 'pointing'])
             args.config = Path(folder) / 'calibration.json'
             save_calibration(args.config, Calibration())
             with (patch.dict('os.environ', {'DISPLAY': ':test'}),

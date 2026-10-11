@@ -25,6 +25,9 @@ class Hand:
     label: str  # MediaPipe's raw classification, resolved by physical calibration.
     confidence: float
     points: tuple[Point, ...]
+    # World landmarks are hand-centered metric predictions, not scene positions.
+    # Keep them separate: normalized image z has a different coordinate scale.
+    world_points: tuple[Point, ...] | None = None
 
     @property
     def pinch_ratio(self) -> float:
@@ -82,3 +85,6 @@ class MusicalState:
     right_fresh: bool = False
     finger: Point | None = None
     wrist: Point | None = None
+    finger_states: tuple[int, ...] = ()  # -1 unknown, 0 lifted, 1 pressed-like.
+    finger_scores: tuple[float | None, ...] = ()
+    fingering_mode: str = "pointing"

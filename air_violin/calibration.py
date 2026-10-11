@@ -3,7 +3,8 @@
 from dataclasses import replace
 import math
 import statistics
-from .config import Calibration, Rect
+from .config import Calibration, FingerCalibration, Rect
+from .fingering import finger_features, FINGER_NAMES
 from .types import Hand, Point, TrackingFrame
 
 STEPS = (
@@ -18,12 +19,30 @@ STEPS = (
     ("Comfortable bow speed", "Press SPACE, then sweep your RIGHT wrist for 3 seconds.", "Stay inside the bow region and use relaxed strokes."),
 )
 
+FINGER_STEPS = STEPS[:2] + (
+    ("Left fingers: comfortably lifted", "Hold LEFT hand like a violin grip, palm visible; all four fingers lifted.", "Keep a natural gentle curve. SPACE records your open pose."),
+    ("Left finger 1: INDEX down", "Lower/curl LEFT index as if stopping a string; other fingers lifted.", "Hold the pose still, then press SPACE."),
+    ("Left finger 2: MIDDLE down", "Keep index down and lower/curl LEFT middle finger.", "Ring and little remain lifted. Hold still, then SPACE."),
+    ("Left finger 3: RING down", "Keep index and middle down; lower/curl LEFT ring finger.", "Little finger remains lifted. Hold still, then SPACE."),
+    ("Left finger 4: LITTLE down", "Keep the lower fingers down; lower/curl LEFT little finger.", "Use a relaxed grip rather than a tight fist. Hold still, then SPACE."),
+    ("Left fingers: release check", "Lift all four fingers back to your original relaxed open pose.", "SPACE checks that lifting returns to the open string."),
+) + STEPS[4:]
+
 
 class Calibrator:
-    def __init__(self, mirrored: bool, confidence: float = 0.65):
+    def __init__(self, mirrored: bool, confidence: float = 0.65,
+                 mode: str = "pointing", initial: Calibration | None = None):
+        if mode not in ("pointing", "fingers"):
+            raise ValueError("Calibration mode must be pointing or fingers")
+        self.mode = mode
+        self.steps = FINGER_STEPS if mode == "fingers" else STEPS
         self.step = 0
         self.confidence = confidence
-        self.value = Calibration(mirrored=mirrored)
+        self.value = initial if initial is not None and initial.mirrored == mirrored else Calibration(mirrored=mirrored)
+        if mode == "fingers":
+            self.value = replace(self.value, version=2)
+        self.lifted = None
+        self.pressed = []
         self.message = ""
         self.corner: Point | None = None
         self.open_pinch = 0.0
@@ -35,10 +54,34 @@ class Calibrator:
 
     @property
     def instructions(self) -> tuple[str, str, str]:
-        return STEPS[self.step]
+        return self.steps[self.step]
+
+    @property
+    def corner_kind(self) -> str | None:
+        if self.mode == "fingers":
+            return "bow" if self.step in (8, 9) else None
+        return "board" if self.step in (2, 3) else "bow" if self.step in (4, 5) else None
+
+    @property
+    def pose_preview(self) -> tuple[float | None, ...]:
+        """Live calibrated press scores for the fingers recorded so far."""
+        if self.mode != "fingers" or not self.recent or self.lifted is None:
+            return (None,) * 4
+        latest = self.recent[-1]
+        hand = latest.hand(self.value.left_label, self.confidence)
+        if hand is None:
+            return (None,) * 4
+        features = finger_features(hand)
+        scores = []
+        for index, feature in enumerate(features):
+            if feature is None or index >= len(self.pressed):
+                scores.append(None)
+            else:
+                scores.append((feature-self.lifted[index])/(self.pressed[index]-self.lifted[index]))
+        return tuple(scores)
 
     def observe(self, frame: TrackingFrame | None, now: float) -> None:
-        if frame is None or now - frame.timestamp > 0.18:
+        if frame is None or not 0 <= now - frame.timestamp <= 0.18:
             return
         if not self.recent or frame.timestamp > self.recent[-1].timestamp:
             self.recent.append(frame)
@@ -67,7 +110,7 @@ class Calibrator:
     def _stable_hand(self, label: str | None, now: float) -> Hand:
         valid = []
         for frame in self.recent:
-            if now - frame.timestamp > 0.45:
+            if not 0 <= now - frame.timestamp <= 0.45:
                 continue
             if label is None:
                 if len(frame.hands) != 1:
@@ -79,7 +122,7 @@ class Calibrator:
                 valid.append(hand)
         if len(valid) < 3 or len({h.label for h in valid}) != 1:
             raise ValueError("Hold the requested hand steadily for a moment, then press SPACE.")
-        if not self.recent or now - self.recent[-1].timestamp > 0.18:
+        if not self.recent or not 0 <= now - self.recent[-1].timestamp <= 0.18:
             raise ValueError("Tracking is stale. Move into camera view and try again.")
         latest = self.recent[-1]
         if (label is None and len(latest.hands) != 1) or latest.hand(valid[-1].label, self.confidence) is None:
@@ -90,8 +133,58 @@ class Calibrator:
                 raise ValueError("Pause your hand briefly to mark a stable position.")
         # Median over a short window reduces single-frame calibration mistakes.
         points = tuple(Point(statistics.median(h.points[i].x for h in valid),
-                             statistics.median(h.points[i].y for h in valid)) for i in range(21))
-        return Hand(valid[-1].label, min(h.confidence for h in valid), points)
+                             statistics.median(h.points[i].y for h in valid),
+                             statistics.median(h.points[i].z for h in valid)) for i in range(21))
+        world_hands = [h for h in valid if h.world_points is not None and len(h.world_points) == 21]
+        world = (tuple(Point(*(statistics.median(getattr(h.world_points[i], axis) for h in world_hands)
+                               for axis in ("x", "y", "z"))) for i in range(21))
+                 if len(world_hands) == len(valid) else None)
+        return Hand(valid[-1].label, min(h.confidence for h in valid), points, world)
+
+    def _finger_step(self, now: float) -> None:
+        label = self.value.left_label if self.step < 8 else self.value.right_label
+        hand = self._stable_hand(label, now)
+        if 2 <= self.step <= 7:
+            features = finger_features(hand)
+            if any(v is None for v in features):
+                raise ValueError("All four finger joints must be visible. Face your palm toward the camera.")
+            if self.step == 2:
+                self.lifted = features
+            elif self.step < 7:
+                index = self.step-3
+                if abs(features[index]-self.lifted[index]) < 0.06:
+                    raise ValueError(f"{FINGER_NAMES[index]} pose is too similar. Bend it more clearly, then SPACE.")
+                self.pressed.append(features[index])
+            else:
+                calibration = FingerCalibration(self.lifted, tuple(self.pressed))
+                scores = [(value-a)/(b-a) for value, a, b in zip(features, calibration.lifted, calibration.pressed)]
+                if any(not -0.75 <= value <= 0.45 for value in scores):
+                    raise ValueError("Lift all four fingers to the original relaxed pose; keep your palm visible.")
+                self.value = replace(self.value, fingers=calibration)
+        elif self.step == 8:
+            point = hand.points[0]
+            if not (0 <= point.x <= 1 and 0 <= point.y <= 1):
+                raise ValueError("Keep the wrist inside the camera view.")
+            self.corner = point
+        elif self.step == 9:
+            point = hand.points[0]
+            rect = Rect(min(self.corner.x, point.x), min(self.corner.y, point.y),
+                        max(self.corner.x, point.x), max(self.corner.y, point.y))
+            if rect.y1-rect.y0 < 0.24:
+                raise ValueError("Use at least 24% frame height for four bow/string bands.")
+            self.value = replace(self.value, bow=rect)
+        elif self.step == 10:
+            self.open_pinch = hand.pinch_ratio
+        elif self.step == 11:
+            closed = hand.pinch_ratio
+            spread = self.open_pinch-closed
+            if spread < 0.25:
+                raise ValueError("Open and pinch poses are too similar. C restarts calibration.")
+            self.value = replace(self.value, pinch_on=max(0.01, closed+0.35*spread), pinch_off=closed+0.60*spread)
+        else:
+            self.started, self.previous = now, None
+            self.speeds.clear()
+            self.message = "Sweep now..."
 
     def advance(self, now: float) -> None:
         if self.started is not None or self.complete:
@@ -104,6 +197,10 @@ class Calibrator:
                     self.value = replace(self.value, left_label=hand.label, right_label=other)
                 elif hand.label != self.value.right_label:
                     raise ValueError("Same label as your left hand. Show only your physical RIGHT hand.")
+            elif self.mode == "fingers":
+                self._finger_step(now)
+                if self.started is not None:
+                    return
             else:
                 label = self.value.left_label if self.step < 4 else self.value.right_label
                 hand = self._stable_hand(label, now)

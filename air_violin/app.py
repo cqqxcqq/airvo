@@ -1,6 +1,7 @@
 """Desktop lifecycle and keyboard controls; the audio thread never calls this UI."""
 
 import argparse
+from collections import deque
 from contextlib import suppress
 from dataclasses import replace
 import os
@@ -19,8 +20,47 @@ from .render import Renderer, WINDOW
 from .runtime import ControlWorker
 from .scenes import SCENES
 from .segmentation import SegmentationWorker
+from .startup import ResourceLoader
 from .types import AudioState
 from .vision import VisionWorker
+
+
+class OpenCVWindow:
+    """Compatibility transport when an OpenGL 3.3 window is unavailable."""
+
+    def __init__(self):
+        self.closed = False
+        cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(WINDOW, 920, 710)
+
+    def present(self, canvas, **kwargs):
+        cv2.imshow(WINDOW, canvas)
+
+    def poll(self):
+        key = cv2.waitKey(10)
+        self.closed = (key & 0xFF) in (27, ord("q")) if key != -1 else False
+        if not self.closed:
+            self.closed = cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1
+        return [key & 0xFF] if key != -1 else []
+
+    def set_fullscreen(self, enabled):
+        cv2.setWindowProperty(WINDOW, cv2.WND_PROP_FULLSCREEN,
+                              cv2.WINDOW_FULLSCREEN if enabled else cv2.WINDOW_NORMAL)
+
+    def close(self):
+        cv2.destroyAllWindows()
+
+
+def open_window(backend, report):
+    if backend != "2d":
+        try:
+            from .stage_window import StageWindow
+            window = StageWindow()
+            print(f"3D graphics: {window.renderer_name}")
+            return window, True
+        except Exception as exc:
+            report(f"3D graphics unavailable: {exc}. Using 2D; update graphics drivers or use --renderer 2d.")
+    return OpenCVWindow(), False
 
 
 def parser() -> argparse.ArgumentParser:
@@ -28,7 +68,14 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--demo", action="store_true", help="Keyboard instrument; no camera or model required")
     p.add_argument("--silent", action="store_true", help="Explicitly disable hardware audio")
     p.add_argument("--camera", type=int, default=0)
-    p.add_argument("--backend", choices=("auto", "dshow", "msmf"), default="auto")
+    p.add_argument("--backend", choices=("auto", "dshow", "msmf"),
+                   default="dshow" if sys.platform == "win32" else "auto",
+                   help="Camera API; Windows defaults to DirectShow to avoid slow MSMF startup")
+    p.add_argument("--fingering", choices=("fingers", "pointing"), default="fingers")
+    p.add_argument("--renderer", choices=("auto", "3d", "2d"), default="auto",
+                   help="Native 3D by default; 2D compatibility remains available")
+    p.add_argument("--string", choices=("auto", "G", "D", "A", "E"), default="auto",
+                   help="Lock a string for finger practice or select by bow-hand height")
     p.add_argument("--width", type=int, default=640)
     p.add_argument("--height", type=int, default=480)
     p.add_argument("--no-mirror", action="store_true", help="Changing mirror mode requires recalibration")
@@ -89,7 +136,9 @@ def run(args) -> int:
         calibration = load_calibration(args.config, mirrored)
     except (OSError, ValueError, TypeError, KeyError) as exc:
         report(f"Calibration not usable: {exc}. Existing file kept; please recalibrate.")
-    calibrated = calibration is not None
+    fingering_mode = args.fingering
+    string_override = None if args.string == "auto" else ("G", "D", "A", "E").index(args.string)
+    calibrated = calibration is not None and (fingering_mode == "pointing" or calibration.fingers is not None)
     if args.bow_speed is not None:
         calibration = replace(calibration or Calibration(mirrored=mirrored), bow_full_speed=args.bow_speed)
     calibration = calibration or Calibration(mirrored=mirrored)
@@ -99,7 +148,8 @@ def run(args) -> int:
     device = int(args.device) if args.device and args.device.isdecimal() else args.device
     audio = AudioEngine(bus, device, args.sample_rate, args.block_size, controls.tracking_timeout)
     camera = vision = wizard = segmentation = control_worker = None
-    instrument = Instrument(calibration, controls, args.bow_mode)
+    instrument = Instrument(calibration, controls, args.bow_mode,
+                            fingering_mode=fingering_mode, string_override=string_override)
     try:
         renderer = Renderer(args.scene, args.background, args.quality, args.reduced_motion,
                             not args.no_background, args.background_blur, args.effects,
@@ -112,29 +162,28 @@ def run(args) -> int:
     help_visible = demo_mode
     volume = args.volume
     bow_mode = args.bow_mode
+    window = camera_loader = audio_loader = None
+    audio_owned = args.silent
+    audio_reported = camera_reported = False
+    pending_keys = deque(maxlen=64)
     try:
+        # Create the window before any blocking camera/audio-device operation.
+        window, renderer.use_3d = open_window(args.renderer, report)
+        if renderer.use_3d:
+            window.confidence, window.timeout = controls.confidence, controls.tracking_timeout
+        renderer.graphics_label = "3D" if renderer.use_3d else "2D compatibility"
         if not args.silent:
-            try:
+            def start_audio():
                 audio.start()
-            except Exception as exc:
-                report(f"Audio unavailable: {exc}. Visual controls remain usable; R retries audio.")
+                return audio
+            audio_loader = ResourceLoader("audio", start_audio)
         else:
             report("Silent mode: no hardware audio output.")
         if not demo_mode:
-            try:
+            def start_camera():
                 verify_model(args.model)
-                camera = Camera(args.camera, args.width, args.height, mirrored, args.backend)
-                vision = VisionWorker(camera, args.model, args.confidence)
-                control_worker = ControlWorker(vision, bus, calibration, controls, args.bow_mode, args.volume)
-                segmentation = SegmentationWorker(camera, args.segmenter_model)
-                if not calibrated:
-                    wizard = Calibrator(mirrored, args.confidence)
-            except (OSError, ValueError, RuntimeError, IndexError) as exc:
-                report(f"Camera mode unavailable: {exc}. Using keyboard demo.")
-                demo_mode = True
-                help_visible = True
-        cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(WINDOW, 920, 710)
+                return Camera(args.camera, args.width, args.height, mirrored, args.backend)
+            camera_loader = ResourceLoader("camera", start_camera)
         vision_failure_reported = False
         camera_failure_reported = False
         segmentation_failure_reported = False
@@ -145,6 +194,27 @@ def run(args) -> int:
         started = time.perf_counter()
         while True:
             now = time.perf_counter()
+            if audio_loader and audio_loader.done.is_set() and not audio_reported:
+                audio_owned = audio_loader.take() is not None
+                audio_reported = True
+                if audio_loader.error:
+                    report(f"Audio unavailable: {audio_loader.error}. R retries audio; controls remain usable.")
+                else:
+                    print(f"Audio ready in {audio_loader.elapsed:.2f}s")
+            if camera_loader and camera_loader.done.is_set() and not camera_reported:
+                camera = camera_loader.take()
+                camera_reported = True
+                if camera is None:
+                    report(f"Camera unavailable: {camera_loader.error}. Using keyboard demo.")
+                    demo_mode, help_visible = True, True
+                else:
+                    print(f"Camera opened in {camera_loader.elapsed:.2f}s ({args.backend})")
+                    vision = VisionWorker(camera, args.model, args.confidence)
+                    control_worker = ControlWorker(vision, bus, calibration, controls, bow_mode, volume,
+                                                   fingering_mode=fingering_mode, string_override=string_override)
+                    segmentation = SegmentationWorker(camera, args.segmenter_model)
+                    if not calibrated:
+                        wizard = Calibrator(mirrored, args.confidence, mode=fingering_mode, initial=calibration)
             camera_frame = camera.latest.get() if camera else None
             tracking = vision.latest.get() if vision else None
             mask = segmentation.latest.get() if segmentation else None
@@ -168,25 +238,34 @@ def run(args) -> int:
                     calibration = wizard.value
                     if args.bow_speed is not None:
                         calibration = replace(calibration, bow_full_speed=args.bow_speed)
-                    instrument = Instrument(calibration, controls, bow_mode)
+                    instrument = Instrument(calibration, controls, bow_mode,
+                                            fingering_mode=fingering_mode, string_override=string_override)
                     calibrated = True
                     try:
                         save_calibration(args.config, calibration)
-                        report("Calibration saved. Preview a note with your left index, then sweep your right wrist.")
+                        report("Calibration saved. Lift/curl left fingers and sweep your right wrist." if fingering_mode == "fingers"
+                               else "Calibration saved. Point with your left index and sweep your right wrist.")
                     except OSError as exc:
                         report(f"Calibration works for this session but was not saved: {exc}")
                     wizard = None
             if demo_mode:
                 if control_worker:
-                    control_worker.configure(calibration, bow_mode, volume, False)
+                    control_worker.configure(calibration, bow_mode, volume, False,
+                                             fingering_mode=fingering_mode, string_override=string_override)
                 state = keyboard.update(now, volume)
             elif wizard:
                 if control_worker:
-                    control_worker.configure(calibration, bow_mode, volume, False)
-                state = Instrument(wizard.value, controls, bow_mode).update(None, now, volume)
+                    control_worker.configure(calibration, bow_mode, volume, False,
+                                             fingering_mode=fingering_mode, string_override=string_override)
+                state = Instrument(wizard.value, controls, bow_mode,
+                                   fingering_mode=fingering_mode, string_override=string_override).update(None, now, volume)
             else:
-                control_worker.configure(calibration, bow_mode, volume, True)
-                state = control_worker.latest.get() or instrument.update(None, now, volume)
+                if control_worker:
+                    control_worker.configure(calibration, bow_mode, volume, True,
+                                             fingering_mode=fingering_mode, string_override=string_override)
+                    state = control_worker.latest.get() or instrument.update(None, now, volume)
+                else:
+                    state = instrument.update(None, now, volume)
             if demo_mode or wizard:
                 bus.publish(state.audio)
             if audio.health.underruns > last_underruns:
@@ -199,15 +278,40 @@ def run(args) -> int:
             if audio.health.error and notice != audio.health.error:
                 report(audio.health.error)
             image = camera_frame.image if camera_frame and now - camera_frame.timestamp < 0.5 else None
+            startup = ""
+            if not demo_mode:
+                if camera_loader and not camera_reported:
+                    startup = f"Opening webcam {args.camera} ({args.backend})... {camera_loader.elapsed:.1f}s"
+                elif vision and not vision.ready and not vision.error:
+                    startup = "Loading local hand-tracking model..."
+                elif camera and camera_frame is None:
+                    startup = "Waiting for the webcam's first frame..."
+            if audio_loader and not audio_reported:
+                startup += ("  |  " if startup else "") + f"Opening audio output... {audio_loader.elapsed:.1f}s"
             canvas = renderer.draw(image, state, calibration, tracking, wizard,
                                    demo_mode, bow_mode, audio, notice, help_visible, mask,
-                                   camera_frame.timestamp if camera_frame else None, segmentation)
-            cv2.imshow(WINDOW, canvas)
-            key = cv2.waitKey(10)
-            if key != -1:
-                key &= 0xFF
-            if key in (27, ord("q")) or cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
+                                   camera_frame.timestamp if camera_frame else None, segmentation, startup)
+            try:
+                window.present(canvas, tracking=tracking, calibration=calibration, state=state, now=now,
+                               demo=demo_mode, draw_instrument=not (wizard or help_visible or startup),
+                               viewport=renderer.camera_viewport)
+            except Exception as exc:
+                if not renderer.use_3d:
+                    raise
+                report(f"3D rendering stopped: {exc}. Continuing in 2D compatibility mode.")
+                with suppress(Exception):
+                    window.close()
+                renderer.use_3d = False
+                window = OpenCVWindow()
+                window.present(canvas)
+            pending_keys.extend(window.poll())
+            key = pending_keys.popleft() if pending_keys else -1
+            if key in (27, ord("q")) or window.closed:
                 break
+            if renderer.use_3d:
+                # Vsync is driver-dependent. Bound UI work explicitly while
+                # inference and musical controls continue on their own threads.
+                time.sleep(max(0.0, 1 / 30 - (time.perf_counter() - now)))
             if key == ord("h"):
                 help_visible = not help_visible
             elif key == ord("g"):
@@ -224,17 +328,14 @@ def run(args) -> int:
                 renderer.reduced_motion = not renderer.reduced_motion
             elif key == ord("f"):
                 fullscreen = not fullscreen
-                cv2.setWindowProperty(WINDOW, cv2.WND_PROP_FULLSCREEN,
-                                      cv2.WINDOW_FULLSCREEN if fullscreen else cv2.WINDOW_NORMAL)
+                window.set_fullscreen(fullscreen)
             elif key in (ord("+"), ord("=")):
                 volume = min(1.0, volume + 0.05)
             elif key == ord("-"):
                 volume = max(0.0, volume - 0.05)
-            elif key == ord("r") and not args.silent and audio.stream is None:
-                try:
-                    audio.start(); report("Audio output started.")
-                except Exception as exc:
-                    report(f"Audio retry failed: {exc}")
+            elif key == ord("r") and not args.silent and audio.stream is None and audio_reported:
+                audio_loader = ResourceLoader("audio", start_audio)
+                audio_reported, audio_owned = False, False
             elif key == ord("b"):
                 bow_mode = "precision" if bow_mode == "auto" else "auto"
                 instrument.bow.set_mode(bow_mode)
@@ -245,31 +346,53 @@ def run(args) -> int:
                 elif (vision and vision.ready and control_worker and not control_worker.error
                       and not camera.error):
                     demo_mode = False
-                    instrument = Instrument(calibration, controls, bow_mode)
+                    instrument = Instrument(calibration, controls, bow_mode,
+                                            fingering_mode=fingering_mode, string_override=string_override)
                     if not calibrated:
-                        wizard = Calibrator(mirrored, args.confidence)
+                        wizard = Calibrator(mirrored, args.confidence, mode=fingering_mode, initial=calibration)
                 else:
                     report("Camera controls are unavailable. Keep keyboard mode or restart after fixing camera/model setup.")
             elif key == ord("c") and not demo_mode:
-                wizard = Calibrator(mirrored, args.confidence)
+                wizard = Calibrator(mirrored, args.confidence, mode=fingering_mode, initial=calibration)
                 help_visible = False
+            elif key == ord("j") and not demo_mode:
+                fingering_mode = "pointing" if fingering_mode == "fingers" else "fingers"
+                instrument = Instrument(calibration, controls, bow_mode,
+                                        fingering_mode=fingering_mode, string_override=string_override)
+                if fingering_mode == "fingers" and calibration.fingers is None:
+                    wizard = Calibrator(mirrored, args.confidence, mode="fingers", initial=calibration)
+                else:
+                    wizard = None
+                report("Finger controls: curl/lift left fingers; right wrist height selects strings." if fingering_mode == "fingers"
+                       else "Pointing controls: left index selects a screen note.")
+            elif key in (ord("["), ord("]")) and not demo_mode and fingering_mode == "fingers" and not wizard:
+                current = state.string if string_override is None else string_override
+                string_override = max(0, min(3, current + (-1 if key == ord("[") else 1)))
+                report(f"String locked: {('G', 'D', 'A', 'E')[string_override]}. Backslash restores bow-height selection.")
+            elif key == ord("\\") and not demo_mode and fingering_mode == "fingers":
+                string_override = None
+                report("String selection follows right-wrist height: G / D / A / E, top to bottom.")
             elif wizard and not demo_mode and key == ord(" "):
                 wizard.advance(now)
             elif demo_mode:
                 keyboard.key(key, now)
         return 0
     finally:
+        for loader in (camera_loader, audio_loader):
+            if loader:
+                loader.close()
         if control_worker:
             control_worker.close()
         bus.publish(AudioState(time.perf_counter(), volume=0.0))
         if audio.stream is not None:
             time.sleep(0.10)  # Let the output envelope decay before closing.
-        for resource in (audio, segmentation, vision, camera):
+        for resource in (audio if audio_owned else None, segmentation, vision, camera):
             if resource is not None:
                 with suppress(Exception):
                     resource.close()
-        with suppress(cv2.error):
-            cv2.destroyAllWindows()
+        if window:
+            with suppress(Exception):
+                window.close()
 
 
 def main() -> int:

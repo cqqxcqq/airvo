@@ -1,4 +1,115 @@
-# Milestone 2 validation — 11 October 2026
+# Version 0.3.0 validation — 11 October 2026
+
+Development instance: Linux x86_64, glibc 2.41, CPython 3.12.14. The current
+revision passed automated, real-model API, and actual headless OpenGL checks.
+The user previously reported working foundation hand controls; that report does
+not establish acceptance of the new finger classifier or 3D hand attachment.
+The older milestone records below are retained as historical evidence.
+
+| Check | Current outcome |
+| --- | --- |
+| Full unittest suite | **132 passed**, zero skips or expected failures; 2.714 seconds in the complete setup run |
+| Full `bash tools/cloud_setup.sh` | Passed: exact binary pins, dependency imports, `pip check`, all tests, both verified local models, hand/person Tasks inference, synthetic audio/stage checks, and native EGL graphics validator |
+| Windows x64 / Python 3.12 packages | Prior binary-wheel resolution covers the existing pins; the new pyglet 2.1.17 universal wheel also resolved for that target. No Windows execution claim |
+| Finger control | Synthetic checks passed for all 16 finger combinations, highest-stop semantics, unknown fingers, dwell/hysteresis, rotation/scale/mirror behavior, calibration, note transitions, and tracking expiry |
+| Official hand fixture | Actual installed Tasks inference on transient `right_hands.jpg` returned two hands, each with 21 world landmarks and four finite curl features; this validates the adapter/math, not live stopping-gesture recognition |
+| 3D geometry | 14 mesh/pose math tests passed; original violin 6,012 triangles, bow 1,280, marker 120; no external model assets |
+| Actual graphics pipeline | Passed with pyglet 2.1.17, headless EGL, **OpenGL 4.5 Mesa llvmpipe**: texture orientation, vertex/index mesh drawing, shading/depth, tracking expiry, HUD clipping, Enter-key translation, and real application HUD integration |
+| Stage review | Four richer scene captures and finger-calibration captures inspected; independent review found no release-blocking presentation issues. All use labelled synthetic poses |
+| Startup and fallback | Tests passed with substituted devices/window transport: asynchronous loading, failure reporting, cancelled/late resource cleanup, camera/keyboard source ownership, renderer fallback, and control shortcuts |
+| Windows launchers | Static checks: CRLF, quoted project paths, existing-venv reuse, argument forwarding, and actionable errors. **Not executed under Windows cmd** |
+| Physical webcam, audio, Windows graphics, hand grip | **Unrun in this instance**; no physical webcam/audio output or interactive desktop attached |
+| Real finger discrimination, occlusion, sound quality, musical latency | **Unverified**; requires laptop acceptance below |
+
+## Fresh measurements and their scope
+
+The full setup run wrote `artifacts/validation.json`:
+
+- Synthesis of 256-sample blocks at 48 kHz: median **0.524165 ms**, p95
+  **0.783453 ms**, against a **5.333333 ms** block budget.
+- Synthetic mono PCM was finite, with peak **0.209409**, below digital clipping.
+- The synthetic Ode to Joy regression selected all five expected pitches and
+  released at the end. It exercises the existing pointing-controller path,
+  protecting that fallback; finger-playing behavior is covered separately by
+  the new synthetic tests.
+- Real Hand Landmarker Tasks VIDEO CPU inference on blank frames passed.
+
+`artifacts/studio-validation.json` records actual person-model CPU inference on
+**blank frames**: median **4.624276 ms**, p95 **6.745288 ms**. Twenty CPU stage
+render calls across all four scenes measured median **6.751604 ms**, p95
+**71.710450 ms**. Four calls include cold procedural-artwork construction, so
+this report keeps the observed p95 rather than substituting cached-only timing.
+These checks establish model integration and isolated rendering behavior, not
+person cutout quality or sustained concurrent webcam throughput.
+
+`artifacts/3d-review/report.json` records native texture/mesh presentation with
+GPU completion explicitly waited for: median **6.178971 ms**, p95 **11.480858 ms**
+in the final verification run alongside the automated suite.
+The renderer is Mesa **software** llvmpipe, not the user's laptop GPU. Timings
+exclude CPU scene/HUD construction, webcam acquisition, inference, gesture dwell,
+and audio/device latency. The validator additionally exercised the real
+`Renderer.draw` HUD and captured all four presets plus finger calibration.
+That integration check is separate from the isolated presentation benchmark.
+
+No measurement above establishes a sub-100 ms note onset, 30 FPS on a laptop,
+or perceived acoustic quality. The exported WAV is a synthetic regression
+artifact, not a recording of a performance. Screenshot timestamps and landmarks
+are controlled inputs, not evidence of a live camera session.
+
+## Correctness fixes covered by regressions
+
+A confirmed finger pose no longer expires merely because its acquisition time
+is more than 80 ms old. The **80 ms limit applies to observed uncertainty**;
+confirmed geometry remains governed by the normal whole-hand freshness watchdog.
+A regression uses 84 ms-old results and 15 FPS processing to protect this
+separation. Unknown higher fingers cannot become an open string or silently
+allow an unreliable lower note.
+
+The independent 8 ms controller heartbeat now accounts for bounded inference
+delivery age when bridging bow reversals. Previously, 84 ms delivery delay could
+consume nearly all the reversal grace before the result arrived and produce
+flutter. Tests cover delayed 30 FPS motion, an actually stopped result, zero-delay
+behavior, and frozen-result expiry. This allowance does not refresh acquisition
+age or permit indefinitely stale sustain.
+
+String-lock shortcuts update the existing musical controller rather than
+restarting it. A regression changes the string during continuous bowing without
+a new camera frame and verifies preserved bow gating and correct new pitch.
+Calibration migration, physical-role binding, source switching, missing models,
+failed devices, renderer fallback, and late resource cleanup also have checks.
+
+## Laptop acceptance still required
+
+Use [README](../README.md) for setup, shortcuts, and the complete checklist:
+
+1. Update with Setup-Air-Violin.cmd, then launch Play-Air-Violin.cmd. Confirm
+   visible startup progress, clean close/relaunch, and actionable failure errors.
+2. Complete the 13-step finger calibration with physical hands identified
+   separately. Lock D using `--string D`; play the finger-number Ode phrase
+   three times without screen pointing. Check each held pose for unintended
+   changes, and lift the highest stopped finger to expose the next lower one.
+3. Test four wrist-height string bands, Auto/Precision bow, stops, reversals,
+   both mirror settings after recalibration, and lost-hand safe release/recovery.
+4. Move and modestly rotate both grips. The neck and bow frog should follow the
+   correct physical hands without distracting flips. Coarse palm occlusion is
+   not proof of exact depth or virtual contact.
+5. Compare 3D/backgrounds off and on while watching tracking age and underruns.
+   Run ten minutes; compare LOW, 2D, and original camera if responsiveness worsens.
+   Check motion reduction, fullscreen, custom images, and missing-resource paths.
+
+MediaPipe has no dependable per-finger confidence. Degenerate/out-of-calibration
+geometry is rejected, but plausible hidden-joint predictions can survive those
+heuristics. Comfortable gesture discrimination, fast-finger segmentation,
+Windows graphics/device behavior, and actual melody acceptance cannot be settled
+by the cloud tests. No physically accurate string-contact or pressure measurement
+is claimed.
+
+---
+
+# Historical Milestone 2 validation — 11 October 2026
+
+This is the earlier 80-test checkpoint. References to "current" below describe
+that checkpoint; version 0.3.0 above supersedes its feature and test status.
 
 Development instance: Linux x86_64, glibc 2.41, CPython 3.12.14. The current
 automated, model-integration, and illustrative-stage checks passed. Independent
@@ -100,7 +211,7 @@ fallbacks. The available cloud evidence does not resolve those hardware checks.
 
 The following is the earlier foundation checkpoint. Its **58-test count**,
 audio measurements, and then-pending calibration confirmation are historical;
-use the Milestone 2 section above for current evidence and remaining checks.
+use the version 0.3.0 section above for current evidence and remaining checks.
 
 Development instance: Linux x86_64, glibc 2.41, CPython 3.12.14. This document
 reported instance evidence, not acceptance on a user's laptop.

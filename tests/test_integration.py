@@ -4,6 +4,7 @@ import io
 import contextlib
 from pathlib import Path
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -110,7 +111,7 @@ class IntegrationTests(unittest.TestCase):
         engine.bus.publish = published.append
         # Exercise the actual application loop and renderer, substituting only
         # the desktop transport. This does not claim a physical GUI test.
-        args = app.parser().parse_args(["--demo", "--silent"])
+        args = app.parser().parse_args(["--demo", "--silent", "--renderer", "2d"])
         with tempfile.TemporaryDirectory() as folder:
             args.config = Path(folder) / "calibration.json"
             with (patch.dict("os.environ", {"DISPLAY": ":test"}),
@@ -130,16 +131,25 @@ class IntegrationTests(unittest.TestCase):
 
     def test_missing_model_and_failed_audio_fall_back_to_visible_demo(self):
         from air_violin import app
-        args = app.parser().parse_args([])
+        args = app.parser().parse_args(["--renderer", "2d"])
         warnings = io.StringIO()
         with tempfile.TemporaryDirectory() as folder:
             args.config = Path(folder) / "calibration.json"
             args.model = Path(folder) / "missing.task"
+            polls = 0
+            def wait_for_failure(_):
+                nonlocal polls
+                polls += 1
+                # Device initialization is asynchronous; allow it to report its
+                # result before closing, with a bounded number of UI iterations.
+                time.sleep(.01)
+                return ord("q") if polls >= 4 else -1
             with (patch.dict("os.environ", {"DISPLAY": ":test"}),
                   patch.object(app.AudioEngine, "start", side_effect=RuntimeError("no device")),
                   patch.object(app, "Camera") as camera,
                   patch.object(app.cv2, "namedWindow"), patch.object(app.cv2, "resizeWindow"),
-                  patch.object(app.cv2, "imshow"), patch.object(app.cv2, "waitKey", return_value=ord("q")),
+                  patch.object(app.cv2, "imshow"), patch.object(app.cv2, "waitKey", side_effect=wait_for_failure),
+                  patch.object(app.cv2, "getWindowProperty", return_value=1),
                   patch.object(app.cv2, "destroyAllWindows"),
                   contextlib.redirect_stderr(warnings)):
                 self.assertEqual(app.run(args), 0)

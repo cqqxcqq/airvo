@@ -32,6 +32,33 @@ class Rect:
 
 
 @dataclass(frozen=True)
+class FingerCalibration:
+    """User-specific comfortable lifted/pressed geometry, one value per finger."""
+
+    lifted: tuple[float, ...]
+    pressed: tuple[float, ...]
+    engage: float = 0.65
+    release: float = 0.35
+    dwell: float = 0.045
+    unknown_timeout: float = 0.080
+
+    def __post_init__(self) -> None:
+        # JSON arrays become immutable tuples when loaded.
+        object.__setattr__(self, "lifted", tuple(self.lifted))
+        object.__setattr__(self, "pressed", tuple(self.pressed))
+        if len(self.lifted) != 4 or len(self.pressed) != 4:
+            raise ValueError("Calibrate all four fingers")
+        if not all(math.isfinite(v) for v in (*self.lifted, *self.pressed)):
+            raise ValueError("Finger poses must be finite")
+        if any(abs(b - a) < 0.06 for a, b in zip(self.lifted, self.pressed)):
+            raise ValueError("Lifted and pressed finger poses are too similar")
+        if not 0 <= self.release < self.engage <= 1:
+            raise ValueError("Invalid finger hysteresis")
+        if not 0 <= self.dwell <= 0.1 or not 0 < self.unknown_timeout <= 0.080:
+            raise ValueError("Invalid finger timing")
+
+
+@dataclass(frozen=True)
 class Calibration:
     version: int = 1
     mirrored: bool = True
@@ -42,9 +69,10 @@ class Calibration:
     bow_full_speed: float = 0.8  # normalized screen widths per second.
     pinch_on: float = 0.35
     pinch_off: float = 0.55
+    fingers: FingerCalibration | None = None
 
     def __post_init__(self) -> None:
-        if self.version != 1 or not isinstance(self.mirrored, bool):
+        if self.version not in (1, 2) or not isinstance(self.mirrored, bool):
             raise ValueError("Unsupported calibration version or mirror setting")
         if {self.left_label, self.right_label} != {"Left", "Right"}:
             raise ValueError("Calibrate distinct physical left and right hands")
@@ -55,6 +83,8 @@ class Calibration:
             raise ValueError("Bow speed must be 0.15..4 screen widths/second")
         if not 0 < self.pinch_on < self.pinch_off <= 6:
             raise ValueError("Pinch engagement must be smaller than disengagement")
+        if self.fingers is not None and not isinstance(self.fingers, FingerCalibration):
+            raise ValueError("Invalid finger calibration")
 
 
 @dataclass(frozen=True)
@@ -93,6 +123,8 @@ def load_calibration(path: Path, mirrored: bool) -> Calibration | None:
     data = json.loads(path.read_text(encoding="utf-8"))
     data["board"] = Rect(**data["board"])
     data["bow"] = Rect(**data["bow"])
+    if data.get("fingers") is not None:
+        data["fingers"] = FingerCalibration(**data["fingers"])
     calibration = Calibration(**data)
     # Mirroring changes model inputs as well as x coordinates. Recalibrate labels.
     if calibration.mirrored != mirrored:

@@ -8,10 +8,13 @@ from .types import AudioState
 
 
 class ControlWorker:
-    def __init__(self, vision, bus, calibration, controls, mode, volume):
+    def __init__(self, vision, bus, calibration, controls, mode, volume,
+                 fingering_mode="pointing", string_override=None):
         self.vision, self.bus, self.controls = vision, bus, controls
         self.lock = threading.Lock()
-        self.instrument = Instrument(calibration, controls, mode)
+        self.fingering_mode, self.string_override = fingering_mode, string_override
+        self.instrument = Instrument(calibration, controls, mode,
+                                     fingering_mode=fingering_mode, string_override=string_override)
         self.calibration, self.mode, self.volume = calibration, mode, volume
         self.enabled = False
         self.latest = LatestValue()
@@ -20,20 +23,27 @@ class ControlWorker:
         self.thread = threading.Thread(target=self._run, name="musical-control", daemon=True)
         self.thread.start()
 
-    def configure(self, calibration, mode, volume, enabled):
+    def configure(self, calibration, mode, volume, enabled,
+                  fingering_mode="pointing", string_override=None):
         # The same short lock covers publication: disabling returns only after
         # the worker can no longer overwrite keyboard/calibration silence.
         with self.lock:
-            if calibration != self.calibration:
-                self.instrument = Instrument(calibration, self.controls, mode)
+            if (calibration != self.calibration or mode != self.mode
+                    or fingering_mode != self.fingering_mode
+                    or (enabled and not self.enabled)):
+                self.instrument = Instrument(calibration, self.controls, mode,
+                                             fingering_mode=fingering_mode,
+                                             string_override=string_override)
                 self.calibration = calibration
                 self.latest.put(None)
-            elif mode != self.mode or (enabled and not self.enabled):
-                self.instrument = Instrument(calibration, self.controls, mode)
-                self.latest.put(None)
+            if string_override != self.string_override:
+                # String changes are musical transitions, not a new hand/bow
+                # session. Preserve envelopes, finger dwell and motion history.
+                self.instrument.set_string_override(string_override)
             if self.enabled and not enabled:
                 self.bus.publish(AudioState(time.perf_counter(), volume=volume))
             self.mode, self.volume, self.enabled = mode, volume, enabled
+            self.fingering_mode, self.string_override = fingering_mode, string_override
 
     def _run(self):
         try:

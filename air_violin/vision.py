@@ -14,12 +14,16 @@ from .types import Hand, Point, TrackingFrame
 
 def convert_result(result, timestamp: float, inference_ms: float) -> TrackingFrame:
     hands = []
-    for landmarks, categories in zip(result.hand_landmarks, result.handedness):
+    worlds = getattr(result, "hand_world_landmarks", ())
+    for index, (landmarks, categories) in enumerate(zip(result.hand_landmarks, result.handedness)):
         if not categories or len(landmarks) != 21:
             continue
         category = max(categories, key=lambda c: c.score)
+        world = worlds[index] if index < len(worlds) else None
         hands.append(Hand(category.category_name, float(category.score),
-                          tuple(Point(p.x, p.y, p.z) for p in landmarks)))
+                          tuple(Point(p.x, p.y, p.z) for p in landmarks),
+                          tuple(Point(p.x, p.y, p.z) for p in world)
+                          if world is not None and len(world) == 21 else None))
     return TrackingFrame(timestamp, tuple(hands), inference_ms)
 
 

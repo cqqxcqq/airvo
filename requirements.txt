@@ -4,6 +4,8 @@ mediapipe==0.10.32
 numpy==2.2.6
 opencv-contrib-python==4.11.0.86
 sounddevice==0.5.3
+# Native OpenGL stage; universal wheel checked on PyPI, EGL render tested on Linux.
+pyglet==2.1.17
 # Pinned transitive dependencies for a repeatable installation.
 absl-py==2.5.1
 cffi==2.1.1

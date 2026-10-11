@@ -16,6 +16,8 @@ from .types import MusicalState, TrackingFrame
 
 WINDOW = "Air Violin Studio"
 COLORS = ((235, 179, 104), (180, 224, 114), (127, 195, 255), (196, 150, 239))  # BGR
+HAND_BONES = ((0, 1, 2, 3, 4), (0, 5, 6, 7, 8), (5, 9, 10, 11, 12),
+              (9, 13, 14, 15, 16), (13, 17, 18, 19, 20), (17, 0))
 
 
 def text(image, content, x, y, scale=0.5, color=(218, 225, 235), thickness=1, outline=False):
@@ -59,6 +61,9 @@ class Renderer:
         self.anchor = BowAnchor()
         self.effects = MusicalEffects()
         self.background_status = "Camera video"
+        self.use_3d = False
+        self.camera_viewport = (20, 64, 880, 560)
+        self.graphics_label = "2D compatibility"
 
     def cycle_quality(self):
         levels = ("low", "medium", "high")
@@ -67,7 +72,7 @@ class Renderer:
     def draw(self, image, state: MusicalState, calibration: Calibration,
              tracking: TrackingFrame | None, wizard: Calibrator | None,
              demo: bool, bow_mode: str, audio, notice: str = "", help_visible: bool = False,
-             mask=None, camera_timestamp=None, segmentation=None):
+             mask=None, camera_timestamp=None, segmentation=None, startup=""):
         now = time.perf_counter()
         if self.previous_frame:
             self.fps = .9 * self.fps + .1 / max(.001, now - self.previous_frame)
@@ -104,7 +109,9 @@ class Renderer:
         def pixel(x, y):
             return int(ox + x * iw), int(oy + y * ih)
         board = wizard.value.board if wizard else calibration.board
-        if self.guides or wizard:
+        fingering = getattr(wizard, "mode", "pointing") if wizard else state.fingering_mode
+        finger_mode = fingering == "fingers" and not demo
+        if (self.guides or wizard) and not finger_mode:
             overlay = canvas.copy()
             cv2.rectangle(overlay, pixel(board.x0, board.y0), pixel(board.x1, board.y1), (26, 24, 22), -1)
             cv2.addWeighted(overlay, .18, canvas, .82, 0, canvas)
@@ -124,9 +131,20 @@ class Renderer:
             cv2.rectangle(canvas, pixel(bow.x0, bow.y0), pixel(bow.x1, bow.y1), (149, 152, 148), 1, cv2.LINE_AA)
             bx, by = pixel(bow.x0, bow.y0)
             text(canvas, "BOW / " + bow_mode.upper(), bx + 5, by - 8, .38, outline=True)
+        if finger_mode and (self.guides or wizard):
+            bow = wizard.value.bow if wizard else calibration.bow
+            cv2.rectangle(canvas, pixel(bow.x0, bow.y0), pixel(bow.x1, bow.y1), (115, 132, 135), 1, cv2.LINE_AA)
+            for s in range(4):
+                y = bow.y0 + (s + .5) * (bow.y1 - bow.y0) / 4
+                x, py = pixel(bow.x1, y)
+                text(canvas, STRINGS[s], x - 20, py, .43, COLORS[s], outline=True)
+                if s:
+                    y = bow.y0 + s * (bow.y1 - bow.y0) / 4
+                    cv2.line(canvas, pixel(bow.x0, y), pixel(bow.x1, y), (85, 97, 99), 1, cv2.LINE_AA)
         color = COLORS[state.string]
         if not wizard:
-            draw_violin(canvas, board, pixel, state, COLORS, calibration.bow)
+            if not self.use_3d:
+                draw_violin(canvas, board, pixel, state, COLORS, calibration.bow)
             local_pose = self.anchor.update(tracking, calibration, now, iw, ih, self.confidence, self.timeout) if not demo else None
             pose = replace(local_pose, grip=(local_pose.grip[0] + ox, local_pose.grip[1] + oy)) if local_pose else None
             if demo:
@@ -135,22 +153,28 @@ class Renderer:
             self.effects.draw(canvas, state, pose, now, color, note_name(selected),
                               self.quality, self.reduced_motion, self.effect_intensity)
             opacity = max(0., min(1., (self.timeout - (now - pose.timestamp)) / .06)) if pose and not demo else 1.
-            draw_bow(canvas, pose, color, state.audio.intensity * self.effect_intensity if state.audio.gate else 0., opacity)
-            if state.finger and state.left_fresh:
+            if not self.use_3d:
+                draw_bow(canvas, pose, color, state.audio.intensity * self.effect_intensity if state.audio.gate else 0., opacity)
+            if state.finger and state.left_fresh and not finger_mode:
                 cv2.circle(canvas, pixel(state.finger.x, state.finger.y), 6, (245, 255, 250), 2, cv2.LINE_AA)
         if tracking and (wizard or self.debug) and 0 <= now - tracking.timestamp <= self.timeout:
             for hand in tracking.hands:
+                for chain in HAND_BONES:
+                    for a, b in zip(chain, chain[1:]):
+                        cv2.line(canvas, pixel(hand.points[a].x, hand.points[a].y),
+                                 pixel(hand.points[b].x, hand.points[b].y), (89, 172, 164), 1, cv2.LINE_AA)
                 for p in hand.points:
                     cv2.circle(canvas, pixel(p.x, p.y), 2, (138, 238, 230), -1)
                 x, y = pixel(hand.points[0].x, hand.points[0].y)
                 binding = wizard.value if wizard and wizard.step >= 1 else None if wizard else calibration
                 text(canvas, physical_hand_caption(hand.label, binding), x, y + 20, .40, outline=True)
-            if wizard and wizard.corner and wizard.step in (3, 5):
+            if wizard and wizard.corner and getattr(wizard, "corner_kind", None) is not None:
                 cv2.drawMarker(canvas, pixel(wizard.corner.x, wizard.corner.y), (145, 238, 221), cv2.MARKER_CROSS, 20, 2)
-                label = wizard.value.left_label if wizard.step == 3 else wizard.value.right_label
+                is_board = wizard.corner_kind == "board"
+                label = wizard.value.left_label if is_board else wizard.value.right_label
                 hand = tracking.hand(label, wizard.confidence)
                 if hand:
-                    target = hand.points[8 if wizard.step == 3 else 0]
+                    target = hand.points[8 if is_board else 0]
                     cv2.rectangle(canvas, pixel(min(wizard.corner.x, target.x), min(wizard.corner.y, target.y)),
                                   pixel(max(wizard.corner.x, target.x), max(wizard.corner.y, target.y)), (145, 238, 221), 2)
         if state.audio.gate and (state.audio.midi != self.previous_note or not self.previous_gate):
@@ -159,13 +183,14 @@ class Renderer:
         output = np.full((710, 920, 3), (22, 20, 18), dtype=np.uint8)
         text(output, "AIR VIOLIN", 22, 36, .80, (239, 245, 250), 2)
         text(output, "STUDIO", 250, 35, .43, (164, 184, 193))
-        mode = "KEYBOARD DEMO" if demo else "CAMERA / EASY"
-        text(output, mode + "  |  " + self.quality.upper(), 615, 34, .40, (185, 220, 220))
+        mode = "KEYBOARD" if demo else "FINGERING" if finger_mode else "POINTING"
+        text(output, mode + "  /  " + ("3D" if self.use_3d else "2D") + "  /  " + self.quality.upper(), 615, 34, .40, (185, 220, 220))
         origin_y = 90 if wizard else 64
         output[origin_y:origin_y + height, 20:20 + width] = canvas
+        self.camera_viewport = (20 + ox, origin_y + oy, iw, ih)
         if wizard:
             title, instruction, action = wizard.instructions
-            text(output, f"CALIBRATION {wizard.step + 1}/{len(STEPS)}", 680, 119, .43, (172, 224, 212))
+            text(output, f"CALIBRATION {wizard.step + 1}/{len(getattr(wizard, 'steps', STEPS))}", 680, 119, .43, (172, 224, 212))
             y = wrapped_text(output, title, 680, 164, 22, .53)
             if wizard.step == 0:
                 y = wrapped_text(output, "Hand identity is assigned when you press SPACE.", 680, y + 12, 31, .39)
@@ -173,18 +198,32 @@ class Renderer:
             y = wrapped_text(output, action, 680, y + 22)
             message = f"Sweeping: {max(0, 3 - (now - wizard.started)):.1f} seconds left" if wizard.started is not None else wizard.message
             wrapped_text(output, message, 680, y + 22, 31, .39, (132, 183, 255))
+            if finger_mode and 2 <= wizard.step <= 7:
+                text(output, "LEFT FINGERS", 680, 530, .35, (164, 184, 193))
+                for i, score in enumerate(wizard.pose_preview):
+                    tone = COLORS[1] if score is not None and score >= .65 else (132, 183, 255) if score is None else (185, 220, 220)
+                    text(output, f"{i+1}: " + ("--" if score is None else f"{score:.0%}"), 680 + (i % 2) * 102, 552 + (i // 2) * 24, .40, tone)
         else:
             # A narrow performance strip; face, hands and instrument lead the view.
             cv2.rectangle(output, (20, 564), (900, 624), (25, 25, 24), -1)
             text(output, note_name(selected), 35, 605, .90, color, 2)
-            text(output, f"{STRINGS[state.string]} string" if selected is not None else "Left index: choose a note", 124, 589, .43)
-            status = "Bowing" if state.audio.gate else "Move your right hand to bow" if selected is not None else "Ready to play"
+            label = (f"{STRINGS[state.string]} string / " + ("open" if state.zone == 0 else f"finger {state.zone}")) if finger_mode else f"{STRINGS[state.string]} string"
+            text(output, label if selected is not None else "Show your left fingers" if finger_mode else "Left index: choose a note", 124, 589, .43)
+            status = "Bowing" if state.audio.gate else "Sweep your right hand to bow" if selected is not None else "Keep all four fingers visible" if finger_mode else "Ready to play"
             text(output, status, 124, 612, .41, (185, 220, 220))
             text(output, "BOW", 435, 590, .36)
             cv2.rectangle(output, (480, 582), (590, 590), (60, 57, 52), -1)
             cv2.rectangle(output, (480, 582), (480 + int(110 * state.audio.intensity), 590), color, -1)
             text(output, f"{bow_mode.upper()}  |  Volume {state.audio.volume:.0%}", 435, 611, .35)
-            text(output, "Recent: " + "  ".join(list(self.history)[-5:]), 625, 590, .36)
+            if finger_mode:
+                for i, value in enumerate(state.finger_states):
+                    cx = 658 + i * 58
+                    tone = color if value == 1 else (132, 183, 255) if value < 0 else (120, 134, 140)
+                    cv2.circle(output, (cx, 585), 13, tone, -1 if value == 1 else 1, cv2.LINE_AA)
+                    text(output, str(i + 1) if value >= 0 else "?", cx - 5, 590, .40,
+                         (20, 20, 20) if value == 1 else tone)
+            else:
+                text(output, "Recent: " + "  ".join(list(self.history)[-5:]), 625, 590, .36)
             text(output, self.scene.label + (" / background off" if not self.background else ""), 625, 612, .36)
         age = (now - tracking.timestamp) * 1000 if tracking else None
         if self.debug:
@@ -203,21 +242,28 @@ class Renderer:
                 detail += " / lighter segmentation to protect tracking"
             if audio.stream is None:
                 detail += " / audio muted"
-            text(output, detail, 22, 644, .38, (170, 191, 198))
+            if finger_mode and self.history:
+                detail += " / " + " ".join(list(self.history)[-4:])
+            text(output, detail[:120], 22, 644, .38, (170, 191, 198))
+        if startup:
+            cv2.rectangle(output, (130, 262), (790, 386), (27, 27, 25), -1)
+            text(output, "Preparing your studio", 156, 299, .65, (231, 239, 243), 2)
+            wrapped_text(output, startup, 156, 329, 76, .43, (185, 220, 220))
+            text(output, "K keyboard demo   Q quit", 156, 370, .40)
         if notice:
             text(output, notice[:115], 22, 675 if self.debug else 661, .35, (132, 183, 255))
-        text(output, "H help  G guides  S scene  V background  D debug  F fullscreen  C calibrate  Q quit", 22, 693, .39)
+        text(output, "H help  J fingering  S scene  V background  D debug  F fullscreen  C calibrate  Q quit", 22, 693, .39)
         if help_visible:
             cv2.rectangle(output, (80, 165), (820, 494), (32, 28, 23), -1)
-            lines = ["PLAY YOUR AIR VIOLIN", "Left INDEX: select string and note. Right WRIST: sweep horizontally.",
+            lines = ["PLAY YOUR AIR VIOLIN", "Left fingers: lift or curl. Highest finger down selects the note." if finger_mode else "Left INDEX: select string and note. Right WRIST: sweep horizontally.",
+                     "Right wrist: sweep sideways to bow; height selects G / D / A / E." if finger_mode else "J switches pointing / finger controls. C calibrates the selected mode.",
                      "B changes Auto Bow / Precision Bow (pinch to engage).",
                      "Pitch changes stay connected while you keep bowing.",
                      "Stop, leave the bow region, or lose tracking to release safely.",
                      "G shows/hides note guides. S changes scene. V toggles background.",
                      "P cycles LOW / MEDIUM / HIGH. M toggles reduced motion.",
                      "F fullscreen. D diagnostics. C recalibrate. +/- volume. R retry audio.",
-                     "K toggles keyboard: [ ] string, 1..5 note, SPACE sustain, ENTER stroke.",
-                     "Keyboard 0 stops sound. Focus this window for shortcuts.",
+                     "[ ] locks a camera string. Backslash returns to bow-height selection." if finger_mode else "K toggles keyboard: [ ] string, 1..5 note, SPACE sustain, ENTER stroke.",
                      "H closes help. Q or ESC quits."]
             for i, line in enumerate(lines):
                 text(output, line, 100, 200 + i * 26, .45 if i else .63)

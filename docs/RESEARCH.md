@@ -1,84 +1,151 @@
-# Why the first version felt like a note player
+# Gesture and rendering decisions
 
-The criticism is fair. The original grid selected a quantized pitch, wrist
-speed mostly controlled gain, and the same 12-partial sound sustained each
-note. It met the beginner mapping specification, but omitted much of the
-interaction that gives a bowed instrument its character. Drawing a bow alone
-would not address that.
+## Why this revision changes the interaction
 
-## Sources consulted before this update
+The original index-tip grid fulfilled the beginner mapping specification, but
+felt like selecting notes on a screen. Its 2D violin improved presentation
+without changing that interaction. Version 0.3.0 replaces pointing as the default
+with four calibrated stopping gestures, retains pointing as a fallback, and
+attaches an actual 3D mesh to the left grip. The camera still measures poses,
+not contact or force.
 
-1. Julius O. Smith III, *Physical Audio Signal Processing*,
+The persistent audio stream, latest-frame tracking, independent control worker,
+hand-identity calibration, and stale-result safety remain in place. These are
+useful foundations; rendering changes do not require restarting the instrument
+or moving inference into the audio callback.
+
+## Primary sources and actual API checks
+
+1. Google, [MediaPipe Hand Landmarker Python guide](https://ai.google.dev/edge/mediapipe/solutions/vision/hand_landmarker/python)
+   and [tagged 0.10.32 implementation](https://github.com/google-ai-edge/mediapipe/blob/v0.10.32/mediapipe/tasks/python/vision/hand_landmarker.py).
+   The installed result contains handedness, normalized image landmarks, and
+   world landmarks. World coordinates are predicted meters centered separately
+   on each hand, not a shared scene coordinate system. Image coordinates use
+   normalized x/y and wrist-relative z; mixing them as equally scaled Euclidean
+   coordinates would give misleading joint angles.
+2. Google, [Hand Tracking model card](https://storage.googleapis.com/mediapipe-assets/Model%20Card%20Hand%20Tracking%20%28Lite_Full%29%20with%20Fairness%20Oct%202021.pdf).
+   Recognition remains sensitive to pose, visibility, and training-domain
+   limitations. In actual installed-model fixture checks, landmark `visibility`
+   and `presence` were unset. Handedness `Category.score` is left/right
+   classification confidence, not fingertip certainty. No per-finger confidence
+   is invented by this app.
+3. [pyglet installation](https://docs.pyglet.org/en/latest/programming_guide/installation.html)
+   and [OpenGL guide](https://docs.pyglet.org/en/latest/programming_guide/gl.html).
+   Pyglet supplies native window/context handling. The pinned 2.1.17 universal
+   wheel was checked, and development created a real headless Linux EGL context.
+   The app requests OpenGL 3.3. Windows graphics-driver support and physical
+   hand anchoring still need laptop acceptance; Linux software rendering is not
+   evidence of Windows real-time performance.
+4. Julius O. Smith III, *Physical Audio Signal Processing*,
    [Bowed Strings](https://www.dsprelated.com/freebooks/pasp/Bowed_Strings.html).
-   Bow velocity, force, contact position, nonlinear friction, and the instrument
-   body all matter. The text describes velocity-wave digital waveguides,
-   bow-string scattering, and Helmholtz motion. Its discussion of periodic
-   excitation and efficient body coloration supports a simplified sustained
-   harmonic source, but does **not** make additive synthesis a physical model.
-2. Google, [MediaPipe Tasks Image Segmenter overview](https://ai.google.dev/edge/mediapipe/solutions/vision/image_segmenter)
-   and the linked Selfie Segmentation model card. The landscape model has
-   144 × 256 input and is intended for portrait/background segmentation. Actual
-   Python 0.10.32 testing confirmed one confidence output labelled `selfie`.
-   Assuming two output masks would break this model integration.
-3. Google's [Image Segmenter test source](https://github.com/google-ai-edge/mediapipe/blob/master/mediapipe/tasks/python/test/vision/image_segmenter_test.py)
-   identifies `segmentation_input_rotation0.jpg`. That official fixture was
-   temporarily downloaded to an ignored research directory for actual CPU
-   inference and mask inspection. It is not an application background or a
-   redistributed asset.
+   Bow velocity, force, contact point, nonlinear friction, string propagation,
+   and body response all affect real tone. Our harmonic source with controlled
+   brightness, noise, and envelopes is a lightweight approximation, not the
+   book's physical waveguide model.
+5. Google, [MediaPipe Tasks Image Segmenter overview](https://ai.google.dev/edge/mediapipe/solutions/vision/image_segmenter)
+   and [Image Segmenter test source](https://github.com/google-ai-edge/mediapipe/blob/master/mediapipe/tasks/python/test/vision/image_segmenter_test.py).
+   The landscape selfie model has 144 × 256 input. Actual 0.10.32 inference
+   produced one confidence output labelled `selfie`; assuming two masks would
+   break integration. Google's segmentation fixture was used only for inference
+   validation, not as a shipped background.
 
-All links were fetched over verified HTTPS during development. No source was
-used as evidence of measured responsiveness on the user's laptop.
+These sources establish API behavior and engineering constraints. They do not
+establish the app's measured musical latency or recognition accuracy on the
+user's laptop. Exact validation evidence belongs in [VALIDATION.md](VALIDATION.md).
 
-## Concrete changes and their limits
+## Four-finger control
 
-The sound now has up to 24 band-limited harmonics, gently colored by two broad
-**designed** body response bands. Their frequencies are engineering choices,
-not measurements of a particular violin. Increasing bow speed opens harmonic
-rolloff with a 40 ms smoothing time constant, so speed changes tone color as
-well as loudness. Stroke starts and nonzero direction reversals introduce short,
-small friction/brightness accents. Oscillator phase and the main envelope
-continue through reversals and note changes: every camera frame does not
-restart a sound. Noise is deliberately quiet and less bass-heavy.
+For index/middle/ring/little, the controller combines PIP/DIP joint bending
+with tip-to-base shortening, using the hand-relative metric landmarks. The
+weighted measurement is 75% bend and 25% shortening. Invalid bone geometry or
+missing world landmarks is unknown, not an arbitrary fallback note.
 
-The decorative instrument has a violin body, f holes, four strings, fingerboard,
-active string, note marker, and a bow grip derived from the calibrated physical
-right hand. This connects gesture feedback to the musical metaphor. Its position
-is calibrated in 2D, not estimated from a full body pose or three-dimensional
-string collision. Hiding the teaching grid does not change its logical mapping.
+Calibration records comfortably curved lifted fingers, then cumulative
+stopping poses: index; index+middle; index+middle+ring; all four. A final all-up
+pose verifies release. Per-finger endpoints normalize curl into an activation
+score. Separate engage/release thresholds, 25 ms exponential smoothing, and a
+short dwell suppress jitter. These are configurable engineering values, not a
+claim of measured onset latency.
 
-The beginner five-zone mapping remains intentionally simplified. There is no
-physical finger pressure, real bow contact, contact-point timbre control,
-continuous fingerboard intonation, trained gesture coach, or acoustic violin
-simulation. A webcam cannot recover bow force from bare hands. Adding a hidden
-"pressure" heuristic would imply a capability we cannot measure and would risk
-making the working controls less predictable.
+The highest stopped finger determines pitch. Lower fingers can remain stopped
+or uncertain without altering a confirmed higher finger. Every finger above
+that finger must be confidently lifted; an unknown higher finger could still
+be stopping the imaginary string. With no stopped fingers, all four must be
+confidently lifted for the open string. Unresolved fingering expires after a
+short timeout rather than silently becoming open.
 
-A genuine physical model or measured, legally licensed violin samples remain
-possible later improvements, after laptop acceptance of this stage. No samples,
-reverb, vibrato, advanced chromatic mode, scoring, or recording were silently
-added as incomplete later milestones.
+This is intentionally quantized: open strings MIDI 55/62/69/76 and offsets
+0/2/4/5/7. Those intervals are not a universal violin scale or continuous
+intonation. The webcam estimates a pressed-like gesture, not actual pressure.
+Sideways fingers, severe overlap, and a closed fist remain difficult. Plausible
+model hallucinations cannot always be detected through geometry checks.
 
-## Background and performance choices
+Four right-wrist height bands select G/D/A/E while horizontal motion controls
+bow speed. Hysteresis and dwell keep ordinary strokes from crossing strings
+accidentally. Explicit keyboard locking permits learning one string first.
+This is a deliberate string-selection control, not a reconstructed collision
+between the 3D bow and strings.
 
-SelfieSegmenter landscape version 1 is verified by pinned SHA-256
+## Real 3D with bounded assumptions
+
+`mesh3d.py` builds original procedural violin and bow meshes from numerical
+geometry. They have depth, surface normals, materials/colors, and perspective
+shading. No external model file, image, or copyrighted asset is silently
+required. The geometry is distributed as source under the project's license.
+
+`stage_window.py` displays the camera/stage and controls as textures and draws
+the mesh through a native OpenGL context. Normal rendering does not read the GPU
+framebuffer back to the CPU. Camera/inference/control/audio workers keep their
+existing roles. A missing or unsupported graphics context has a 2D fallback.
+
+The left thumb/index web anchors the neck grip. Palm landmarks supply a stable
+orientation, with bounded tilt from hand-relative world geometry. The right
+palm/grip anchors the bow frog. Overall depth and scale are estimates; each
+hand's world coordinates have an independent origin, so subtracting them cannot
+measure hand separation or true bow/string contact.
+
+A small camera-texture palm-hull cutout gives coarse image-space hand occlusion.
+It is not measured depth, precise fingertip occlusion, or contact simulation.
+Tracking loss removes the stale visual and releases sound through the normal
+safety path. Musical selection remains independent of decorative pose.
+
+## Timbre and background decisions
+
+The sound uses up to 24 band-limited harmonics, colored by two broad **designed**
+body response bands. These frequencies are engineering choices, not measurements
+of a particular violin. Bow speed opens harmonic rolloff and changes gain with
+smoothing. Stroke starts and nonzero reversals add restrained short accents;
+oscillator phase and the main envelope remain continuous through note changes.
+Friction noise is quiet and filtered. No sampled violin, physical friction
+solver, reverb, or vibrato is claimed.
+
+All four backgrounds are original procedural scenes: acoustic Studio with
+spotlights/floor perspective; layered Nebula clouds/stars; Midnight Rain city,
+lamps/reflections; Forest of Light canopy/clearing/fireflies. Cached artwork and
+bounded dynamic effects preserve reduced-motion and LOW/MEDIUM/HIGH controls.
+Custom JPG/PNG images use aspect-correct cover fitting.
+
+The optional person segmenter runs separately with requested maxima LOW
+256 px/8 Hz, MEDIUM 384 px/12 Hz, HIGH 512 px/15 Hz. Slow inference further
+limits duty cycle. Stale masks return to original camera video; fresh landmark
+paths conservatively preserve fingers, sometimes retaining room background.
+Segmentation is not an input to hand recognition. No claim of accurate scene
+depth follows from a person mask.
+
+The musical control heartbeat is independent of graphics, and audio has its own
+stale-state watchdog. Threads reduce coupling but cannot guarantee responsiveness
+under CPU exhaustion or Python scheduling. Compare graphics/backgrounds on/off
+on actual hardware before increasing quality.
+
+## Model integrity and redistribution
+
+The official SelfieSegmenter landscape version-1 model is pinned to SHA-256
 `490e9ea734313e0de10fa0cd9e3c6133e36ea4db2b7a49bde9ef019f72796b8e`.
-Official object size 250177 and MD5 matched Google's object metadata
-(generation 1683436452064647) before establishing the pin. This is integrity
-verification over HTTPS, not a publisher signature. Models download separately;
-all four stage backgrounds are original procedural graphics.
+Official size 250177 and MD5 matched Google object metadata, generation
+1683436452064647, before establishing the pin. The hand model also has a pinned
+SHA-256 and validated task-bundle structure. This is integrity verification
+over HTTPS, not a publisher signature.
 
-CPU inference runs in a separate rate-limited worker: LOW 256 px / 8 Hz,
-MEDIUM 384 px / 12 Hz, HIGH 512 px / 15 Hz. These are requested maxima, not
-promised throughput. Slow inference further limits its duty cycle. Tracking
-results older than 140 ms or a new audio underrun temporarily request LOW.
-A mask older than 250 ms is discarded in favor of the original camera video.
-Fresh hand landmark paths conservatively preserve fingers; this may retain
-small pieces of room background around a hand. Fast motion, dim lighting,
-unusual backgrounds, multiple people, and objects near the body remain real
-model limitations. Segmentation does not feed the hand detector.
-
-The musical controller has an independent 8 ms polling heartbeat. This is a
-scheduling interval, not measured musical latency. Source changes use a short
-publication lock so the camera worker cannot overwrite keyboard audio state.
-Audio has its own stale-state watchdog. Separate threads reduce coupling but
-cannot guarantee responsiveness under CPU exhaustion or Python scheduling.
+Models download separately to ignored `models/` files with checksum sidecars.
+Runtime does not download anything. Graphics and 3D geometry are original code;
+no internet background or model asset is redistributed.
