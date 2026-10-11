@@ -1,0 +1,21 @@
+# Verified together on CPython 3.12, Linux x86_64. Windows x64 wheel availability
+# is checked separately; physical Windows webcam/audio testing remains required.
+mediapipe==0.10.32
+numpy==2.2.6
+opencv-contrib-python==4.11.0.86
+sounddevice==0.5.3
+# Pinned transitive dependencies for a repeatable installation.
+absl-py==2.5.1
+cffi==2.1.1
+contourpy==1.4.0
+cycler==0.12.1
+flatbuffers==25.12.19
+fonttools==4.66.1
+kiwisolver==1.5.1
+matplotlib==3.11.2
+packaging==26.3
+pillow==12.3.0
+pycparser==3.11
+pyparsing==3.3.3
+python-dateutil==2.9.0.post0
+six==1.17.0
