@@ -79,12 +79,27 @@ class MeshGeometryTests(unittest.TestCase):
         for string in range(1, 5):
             selected = self.violin.vertices[self.violin.tags == string]
             self.assertGreater(len(selected), 20)
-            self.assertLess(float(selected[:, 1].min()), -2.79)
-            self.assertGreater(float(selected[:, 1].max()), .97)
+            self.assertLess(float(selected[:, 1].min()), -2.43)
+            self.assertGreater(float(selected[:, 1].max()), 1.23)
             self.assertGreater(float(selected[:, 2].max()), .55)
-            centers.append(float(selected[:, 0].mean()))
+            # Realistic string spacing widens from nut to bridge.
+            centers.append(float(selected[selected[:, 1] < -2.439, 0].mean()))
         np.testing.assert_allclose(centers, (-.075, -.025, .025, .075), atol=1e-5)
         self.assertTrue(np.all(np.diff(centers) > .04))
+
+    def test_full_size_proportions_and_smooth_body_lighting(self):
+        # A 4/4 violin is approximately 590 mm long and 208 mm wide.
+        span = np.ptp(self.violin.vertices, axis=0)
+        self.assertGreater(float(span[1] / span[0]), 2.75)
+        self.assertLess(float(span[1] / span[0]), 2.95)
+        self.assertGreater(float(span[1]), 5.85)
+        self.assertLess(float(span[1]), 5.98)
+        # Smooth vertices on the same arched plate share their normals.
+        front = (self.violin.tags == -1) & (self.violin.vertices[:, 2] > .15) & (self.violin.vertices[:, 1] > -.9)
+        vertices, normals = self.violin.vertices[front], self.violin.normals[front]
+        indices = np.flatnonzero(np.linalg.norm(vertices - (0., .66, .28), axis=1) < 1e-6)
+        self.assertGreaterEqual(len(indices), 6)
+        np.testing.assert_allclose(normals[indices], np.tile(normals[indices[0]], (len(indices), 1)), atol=1e-6)
 
     def test_bow_has_separate_wood_shaft_hair_and_thick_frog(self):
         self.assertGreater(float(self.bow.vertices[:, 0].max()), 5.5)
@@ -150,6 +165,31 @@ class PoseMathTests(unittest.TestCase):
             pose = PoseTracker("bow").update(frame, Calibration(), 1., (640, 480))
             screen_direction = np.array((pose.rotation[0, 0], -pose.rotation[1, 0]))
             self.assertGreater(screen_direction[0] * (left_x - right_x), 0)
+
+    def test_violin_body_extends_toward_torso_in_both_physical_layouts(self):
+        for left_x in (.25, .75):
+            for mirrored in (True, False):
+                cal = replace(Calibration(), mirrored=mirrored, left_label="Right", right_label="Left")
+                frame = TrackingFrame(1., (posed_hand("Right", left_x),))
+                pose = PoseTracker().update(frame, cal, 1., (640, 480))
+                screen_axis = np.array((-pose.rotation[0, 1], pose.rotation[1, 1]))
+                self.assertGreater(screen_axis[0] * (.5 - left_x), .15)
+                self.assertGreater(abs(screen_axis[0]), abs(screen_axis[1]))
+                self.assertGreater(screen_axis[1], .2)
+
+    def test_palm_foreshortening_never_shrinks_violin_or_bow(self):
+        left, right = posed_hand("Left", .25), posed_hand("Right", .75)
+        narrowed = []
+        for hand in (left, right):
+            points = list(hand.points)
+            points[17] = Point(points[5].x + .012, points[5].y + .005)
+            narrowed.append(replace(hand, points=tuple(points)))
+        for kind in ("violin", "bow"):
+            before = PoseTracker(kind).update(TrackingFrame(1., (left, right)), Calibration(), 1., (640, 480))
+            after = PoseTracker(kind).update(TrackingFrame(1., tuple(narrowed)), Calibration(), 1., (640, 480))
+            self.assertEqual(before.scale, after.scale)
+            larger = PoseTracker(kind).update(TrackingFrame(1., (left, right)), Calibration(), 1., (640, 480), size=1.3)
+            self.assertAlmostEqual(larger.scale / before.scale, 1.3)
 
     def test_stale_future_duplicate_low_confidence_results_are_safe(self):
         hand = posed_hand()

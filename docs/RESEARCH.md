@@ -9,6 +9,12 @@ with four calibrated stopping gestures, retains pointing as a fallback, and
 attaches an actual 3D mesh to the left grip. The camera still measures poses,
 not contact or force.
 
+The user's 0.3.0 laptop screenshot exposed shortcomings that synthetic rendering
+alone had not settled: palm-based occlusion erased the neck, hand-size scaling
+produced a toy-like instrument, and the finger feature ignored base-knuckle
+movement. Continuous waving also made phrases tiring. Version 0.3.1 corrects
+those causes. Its assisted sustain is explicitly a convenience mode.
+
 The persistent audio stream, latest-frame tracking, independent control worker,
 hand-identity calibration, and stale-result safety remain in place. These are
 useful foundations; rendering changes do not require restarting the instrument
@@ -55,14 +61,23 @@ user's laptop. Exact validation evidence belongs in [VALIDATION.md](VALIDATION.m
 
 ## Four-finger control
 
-For index/middle/ring/little, the controller combines PIP/DIP joint bending
-with tip-to-base shortening, using the hand-relative metric landmarks. The
-weighted measurement is 75% bend and 25% shortening. Invalid bone geometry or
-missing world landmarks is unknown, not an arbitrary fallback note.
+For index/middle/ring/little, the controller constructs a local palm plane from
+wrist and knuckle landmarks. It measures base-knuckle (MCP) flexion with
+`atan2(abs(normal component), along-palm component)` of the first finger bone.
+The feature combines 65% MCP angle, 20% distal bending, 10% normalized tip height,
+and 5% shortening, using metric world landmarks. These are empirical feature
+weights, not biomechanical measurements. A finger can lower as a whole while
+its smaller joints keep the same curve; the old distal-only feature missed
+that gesture. Rotation and reflection of the entire hand preserve the feature.
+Invalid bone geometry or missing world landmarks is unknown.
 
 Calibration records comfortably curved lifted fingers, then cumulative
-stopping poses: index; index+middle; index+middle+ring; all four. A final all-up
-pose verifies release. Per-finger endpoints normalize curl into an activation
+stopping poses: index; index+middle; index+middle+ring; all four. Each pose uses
+about one second of valid samples, medians, and measured variability. A guided
+4→3→2→1→0 check verifies each release and rejects calibration that only detects
+the open string. Feature-version metadata prevents reuse of old endpoints with
+new math; prior hand identity and the saved file are preserved until success.
+Per-finger endpoints normalize articulation into an activation
 score. Separate engage/release thresholds, 25 ms exponential smoothing, and a
 short dwell suppress jitter. These are configurable engineering values, not a
 claim of measured onset latency.
@@ -83,6 +98,8 @@ model hallucinations cannot always be detected through geometry checks.
 Four right-wrist height bands select G/D/A/E while horizontal motion controls
 bow speed. Hysteresis and dwell keep ordinary strokes from crossing strings
 accidentally. Explicit keyboard locking permits learning one string first.
+Assisted defaults to locked D; in explicitly requested height-selection mode,
+stationary sustain holds the string and horizontal strokes can change it.
 This is a deliberate string-selection control, not a reconstructed collision
 between the 3D bow and strings.
 
@@ -98,14 +115,21 @@ the mesh through a native OpenGL context. Normal rendering does not read the GPU
 framebuffer back to the CPU. Camera/inference/control/audio workers keep their
 existing roles. A missing or unsupported graphics context has a 2D fallback.
 
-The left thumb/index web anchors the neck grip. Palm landmarks supply a stable
-orientation, with bounded tilt from hand-relative world geometry. The right
+The left thumb/index web anchors the neck grip. The body extends diagonally
+toward a stage-center torso estimate; scale depends on stage dimensions and a
+user size setting, not palm width or finger spread. The original model uses
+full-size violin-inspired proportions, smooth arched plates, and cross-section
+grids that avoid folds across the concave C-bouts. Hand-relative geometry supplies
+bounded tilt. No body-pose model or measured torso anchor is claimed. The right
 palm/grip anchors the bow frog. Overall depth and scale are estimates; each
 hand's world coordinates have an independent origin, so subtracting them cannot
 measure hand separation or true bow/string contact.
 
-A small camera-texture palm-hull cutout gives coarse image-space hand occlusion.
-It is not measured depth, precise fingertip occlusion, or contact simulation.
+Palm-hull cutouts are disabled by default: the user's screenshot showed a palm
+polygon erasing the middle of the neck. It cannot establish which pixels are
+actually in front of the mesh. The violin may draw over the hand until a useful
+depth/occlusion method is implemented. This is not precise fingertip occlusion
+or contact simulation.
 Tracking loss removes the stale visual and releases sound through the normal
 safety path. Musical selection remains independent of decorative pose.
 
@@ -118,6 +142,29 @@ smoothing. Stroke starts and nonzero reversals add restrained short accents;
 oscillator phase and the main envelope remain continuous through note changes.
 Friction noise is quiet and filtered. No sampled violin, physical friction
 solver, reverb, or vibrato is claimed.
+
+Assisted Bow latches a phrase after a small genuine horizontal excursion,
+roughly 1.2–1.5% of frame width for ordinary calibration, or explicit Space.
+It sustains at a modest intensity floor while both hands remain freshly tracked.
+Pinch, Space, 0, stale tracking, or a detector teleport stops it. The control
+worker updates independently of graphics; latching never refreshes old capture
+timestamps. Auto and Precision retain stroke-dependent sound. A stationary
+real bow does not produce this continuous tone: assisted sustain trades that
+physical constraint for comfort and learnability.
+
+### Acoustic, physical-model, and gesture instruments
+
+| Instrument | How it produces tone | What this application supplies |
+| --- | --- | --- |
+| Acoustic violin | Bow hair sticks/slips on a string; tension, contact point, bow force, and body resonance determine vibration | No physical string, contact, or pressure sensor |
+| Physical-model simulation | Numerically approximates friction, wave propagation, and body response | Not implemented; a webcam cannot directly measure bow force |
+| This gesture synthesizer | Finger pitch drives continuous harmonics, noise, and envelopes; gestures control expression | Playable melodic controls and violin-inspired tone, with simplified articulation |
+
+A sample-based instrument can sound more convincing using licensed recordings
+without becoming a physical simulation. An attractive 3D model also does not
+make the audio model physically accurate. Acoustic realism remains a separate
+development task; current acceptance focuses on controllable melodies and
+comfortable performance.
 
 All four backgrounds are original procedural scenes: acoustic Studio with
 spotlights/floor perspective; layered Nebula clouds/stars; Midnight Rain city,

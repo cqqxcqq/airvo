@@ -196,10 +196,15 @@ class Renderer:
                 y = wrapped_text(output, "Hand identity is assigned when you press SPACE.", 680, y + 12, 31, .39)
             y = wrapped_text(output, instruction, 680, y + 22)
             y = wrapped_text(output, action, 680, y + 22)
-            message = f"Sweeping: {max(0, 3 - (now - wizard.started)):.1f} seconds left" if wizard.started is not None else wizard.message
+            message = (f"Sweeping: {max(0, 3 - (now - wizard.started)):.1f} seconds left"
+                       if wizard.started is not None else wizard.verification_note
+                       if wizard.verification_active else wizard.message or wizard.progress_message)
             wrapped_text(output, message, 680, y + 22, 31, .39, (132, 183, 255))
             if finger_mode and 2 <= wizard.step <= 7:
-                text(output, "LEFT FINGERS", 680, 530, .35, (164, 184, 193))
+                target = 4 - wizard.verification_progress
+                heading = (f"CHECK {wizard.verification_progress}/5: " + ("OPEN" if target == 0 else f"FINGER {target}")
+                           if wizard.verification_active else "LEFT FINGERS / PRESS AMOUNT")
+                text(output, heading, 680, 530, .35, (164, 184, 193))
                 for i, score in enumerate(wizard.pose_preview):
                     tone = COLORS[1] if score is not None and score >= .65 else (132, 183, 255) if score is None else (185, 220, 220)
                     text(output, f"{i+1}: " + ("--" if score is None else f"{score:.0%}"), 680 + (i % 2) * 102, 552 + (i // 2) * 24, .40, tone)
@@ -209,7 +214,12 @@ class Renderer:
             text(output, note_name(selected), 35, 605, .90, color, 2)
             label = (f"{STRINGS[state.string]} string / " + ("open" if state.zone == 0 else f"finger {state.zone}")) if finger_mode else f"{STRINGS[state.string]} string"
             text(output, label if selected is not None else "Show your left fingers" if finger_mode else "Left index: choose a note", 124, 589, .43)
-            status = "Bowing" if state.audio.gate else "Sweep your right hand to bow" if selected is not None else "Keep all four fingers visible" if finger_mode else "Ready to play"
+            status = ("Sustaining: pinch / Space stops" if state.audio.gate and state.bow_sustaining
+                      else "Bowing" if state.audio.gate
+                      else "Short stroke / Space starts" if selected is not None and bow_mode == "assisted" and not demo
+                      else "Sweep your right hand to bow" if selected is not None and not demo
+                      else "Space sustains / Enter bows" if demo
+                      else "Keep all four fingers visible" if finger_mode else "Ready to play")
             text(output, status, 124, 612, .41, (185, 220, 220))
             text(output, "BOW", 435, 590, .36)
             cv2.rectangle(output, (480, 582), (590, 590), (60, 57, 52), -1)
@@ -222,9 +232,12 @@ class Renderer:
                     cv2.circle(output, (cx, 585), 13, tone, -1 if value == 1 else 1, cv2.LINE_AA)
                     text(output, str(i + 1) if value >= 0 else "?", cx - 5, 590, .40,
                          (20, 20, 20) if value == 1 else tone)
+                    score = state.finger_scores[i]
+                    text(output, "--" if score is None else f"{max(0, min(1, score)):.0%}", cx - 14, 612, .30, tone)
             else:
                 text(output, "Recent: " + "  ".join(list(self.history)[-5:]), 625, 590, .36)
-            text(output, self.scene.label + (" / background off" if not self.background else ""), 625, 612, .36)
+            if not finger_mode:
+                text(output, self.scene.label + (" / background off" if not self.background else ""), 625, 612, .36)
         age = (now - tracking.timestamp) * 1000 if tracking else None
         if self.debug:
             inference = f"{tracking.inference_ms:.1f}ms" if tracking else "--"
@@ -254,17 +267,20 @@ class Renderer:
             text(output, notice[:115], 22, 675 if self.debug else 661, .35, (132, 183, 255))
         text(output, "H help  J fingering  S scene  V background  D debug  F fullscreen  C calibrate  Q quit", 22, 693, .39)
         if help_visible:
-            cv2.rectangle(output, (80, 165), (820, 494), (32, 28, 23), -1)
+            cv2.rectangle(output, (65, 145), (855, 538), (32, 28, 23), -1)
             lines = ["PLAY YOUR AIR VIOLIN", "Left fingers: lift or curl. Highest finger down selects the note." if finger_mode else "Left INDEX: select string and note. Right WRIST: sweep horizontally.",
-                     "Right wrist: sweep sideways to bow; height selects G / D / A / E." if finger_mode else "J switches pointing / finger controls. C calibrates the selected mode.",
-                     "B changes Auto Bow / Precision Bow (pinch to engage).",
-                     "Pitch changes stay connected while you keep bowing.",
-                     "Stop, leave the bow region, or lose tracking to release safely.",
+                     "Assisted: short stroke or SPACE starts a sustained phrase.",
+                     "Rest the right hand in view. Pinch, SPACE or 0 stops Assisted.",
+                     "B cycles Assisted / Auto / Precision. Precision pinches to engage.",
+                     "Auto and Precision follow strokes. Lost tracking releases all modes.",
+                     "[ ] changes string. Backslash enables bow-height selection." if finger_mode else "J switches pointing / finger controls. C calibrates the selected mode.",
+                     "Pitch changes connect smoothly while sound continues.",
                      "G shows/hides note guides. S changes scene. V toggles background.",
                      "P cycles LOW / MEDIUM / HIGH. M toggles reduced motion.",
                      "F fullscreen. D diagnostics. C recalibrate. +/- volume. R retry audio.",
-                     "[ ] locks a camera string. Backslash returns to bow-height selection." if finger_mode else "K toggles keyboard: [ ] string, 1..5 note, SPACE sustain, ENTER stroke.",
+                     "Comma / period resizes 3D violin. K toggles keyboard controls.",
+                     "Keyboard: [ ] string, 1..5 note, SPACE sustain, ENTER stroke, 0 stop.",
                      "H closes help. Q or ESC quits."]
             for i, line in enumerate(lines):
-                text(output, line, 100, 200 + i * 26, .45 if i else .63)
+                text(output, line, 85, 178 + i * 26, .44 if i else .63)
         return output

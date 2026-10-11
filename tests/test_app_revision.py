@@ -40,6 +40,49 @@ class FakeWindow:
 
 
 class RevisionAppTests(unittest.TestCase):
+    def test_assisted_defaults_keep_a_resting_bow_on_d_unless_auto_is_requested(self):
+        defaults = app.parser().parse_args([])
+        self.assertEqual(defaults.bow_mode, 'assisted')
+        self.assertEqual(app.initial_string(defaults), 1)
+        self.assertIsNone(app.initial_string(app.parser().parse_args(['--string', 'auto'])))
+        self.assertIsNone(app.initial_string(app.parser().parse_args(['--bow-mode', 'auto'])))
+        self.assertEqual(app.initial_string(app.parser().parse_args(['--string', 'E'])), 3)
+
+    def test_old_finger_feature_calibration_requires_recalibration(self):
+        current = replace(Calibration(), version=2, fingers=finger_calibration())
+        obsolete = replace(current, fingers=replace(current.fingers, feature_version=1))
+        self.assertTrue(app.has_finger_calibration(current))
+        self.assertFalse(app.has_finger_calibration(obsolete))
+        self.assertFalse(app.has_finger_calibration(Calibration()))
+
+    def test_camera_sustain_stop_and_resize_keys_reach_their_owners(self):
+        ready = threading.Event()
+        camera = SimpleNamespace(latest=LatestValue(), error='', close=Mock())
+        vision = SimpleNamespace(latest=LatestValue(), error='', ready=True, close=Mock())
+        segmentation = SimpleNamespace(latest=LatestValue(), error='', throttled=False,
+                                       configure=Mock(), close=Mock())
+        worker = SimpleNamespace(latest=LatestValue(), error='', configure=Mock(), close=Mock(),
+                                 toggle_assisted=Mock(), stop_assisted=Mock())
+        window = FakeWindow(list(map(ord, ' 0.,bbbq')), ready.is_set)
+        def make_worker(*_, **kwargs):
+            ready.set()
+            return worker
+        args = app.parser().parse_args(['--silent', '--instrument-size', '1.2'])
+        cal = replace(Calibration(), version=2, fingers=finger_calibration())
+        with (patch.dict('os.environ', {'DISPLAY': ':test'}),
+              patch.object(app, 'open_window', return_value=(window, True)),
+              patch.object(app, 'load_calibration', return_value=cal),
+              patch.object(app, 'verify_model'), patch.object(app, 'Camera', return_value=camera),
+              patch.object(app, 'VisionWorker', return_value=vision),
+              patch.object(app, 'SegmentationWorker', return_value=segmentation),
+              patch.object(app, 'ControlWorker', side_effect=make_worker)):
+            self.assertEqual(app.run(args), 0)
+        worker.toggle_assisted.assert_called_once()
+        worker.stop_assisted.assert_called_once()
+        self.assertAlmostEqual(window.instrument_size, 1.2)
+        self.assertEqual({c.args[1] for c in worker.configure.call_args_list}, {'assisted', 'auto', 'precision'})
+        self.assertTrue(all(c.kwargs['string_override'] == 1 for c in worker.configure.call_args_list))
+
     def test_window_draws_while_camera_factory_is_still_blocked(self):
         entered, release = threading.Event(), threading.Event()
         events = []

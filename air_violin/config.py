@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 import tempfile
 
+FINGER_FEATURE_VERSION = 2
+
 
 @dataclass(frozen=True)
 class Rect:
@@ -41,6 +43,7 @@ class FingerCalibration:
     release: float = 0.35
     dwell: float = 0.045
     unknown_timeout: float = 0.080
+    feature_version: int = FINGER_FEATURE_VERSION
 
     def __post_init__(self) -> None:
         # JSON arrays become immutable tuples when loaded.
@@ -50,7 +53,10 @@ class FingerCalibration:
             raise ValueError("Calibrate all four fingers")
         if not all(math.isfinite(v) for v in (*self.lifted, *self.pressed)):
             raise ValueError("Finger poses must be finite")
-        if any(abs(b - a) < 0.06 for a, b in zip(self.lifted, self.pressed)):
+        if self.feature_version not in (1, FINGER_FEATURE_VERSION):
+            raise ValueError("Unsupported finger feature version")
+        minimum = 0.06 if self.feature_version == 1 else 0.045
+        if any(abs(b - a) < minimum for a, b in zip(self.lifted, self.pressed)):
             raise ValueError("Lifted and pressed finger poses are too similar")
         if not 0 <= self.release < self.engage <= 1:
             raise ValueError("Invalid finger hysteresis")
@@ -124,7 +130,12 @@ def load_calibration(path: Path, mirrored: bool) -> Calibration | None:
     data["board"] = Rect(**data["board"])
     data["bow"] = Rect(**data["bow"])
     if data.get("fingers") is not None:
-        data["fingers"] = FingerCalibration(**data["fingers"])
+        # Old files contain the PIP/DIP-only measurement. Preserve their hand
+        # labels and bow region, but never reinterpret those numbers as the new
+        # MCP-aware feature. The UI asks for fresh fingering calibration.
+        finger_data = dict(data["fingers"])
+        finger_data.setdefault("feature_version", 1)
+        data["fingers"] = FingerCalibration(**finger_data)
     calibration = Calibration(**data)
     # Mirroring changes model inputs as well as x coordinates. Recalibrate labels.
     if calibration.mirrored != mirrored:

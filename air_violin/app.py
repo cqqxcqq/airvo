@@ -12,7 +12,8 @@ import cv2
 from .audio import AudioEngine, StateBus
 from .calibration import Calibrator
 from .capture import Camera
-from .config import Calibration, Controls, default_config_path, load_calibration, save_calibration
+from .config import (Calibration, Controls, FINGER_FEATURE_VERSION,
+                     default_config_path, load_calibration, save_calibration)
 from .controller import Instrument
 from .demo import KeyboardInstrument
 from .models import DEFAULT_MODEL, DEFAULT_SEGMENTER, verify_model
@@ -74,8 +75,10 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--fingering", choices=("fingers", "pointing"), default="fingers")
     p.add_argument("--renderer", choices=("auto", "3d", "2d"), default="auto",
                    help="Native 3D by default; 2D compatibility remains available")
-    p.add_argument("--string", choices=("auto", "G", "D", "A", "E"), default="auto",
-                   help="Lock a string for finger practice or select by bow-hand height")
+    p.add_argument("--string", choices=("auto", "G", "D", "A", "E"), default=None,
+                   help="Assisted defaults to D; auto/precision use bow height. Override with auto/G/D/A/E")
+    p.add_argument("--instrument-size", type=float, default=1.0,
+                   help="3D violin size, independent of palm size (0.65..1.75)")
     p.add_argument("--width", type=int, default=640)
     p.add_argument("--height", type=int, default=480)
     p.add_argument("--no-mirror", action="store_true", help="Changing mirror mode requires recalibration")
@@ -94,7 +97,8 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--sample-rate", type=int, default=48000)
     p.add_argument("--block-size", type=int, default=256)
     p.add_argument("--volume", type=float, default=0.65)
-    p.add_argument("--bow-mode", choices=("auto", "precision"), default="auto")
+    p.add_argument("--bow-mode", choices=("assisted", "auto", "precision"), default="assisted",
+                   help="Assisted: short stroke starts sustain; pinch, Space or 0 stops")
     p.add_argument("--bow-speed", type=float, help="Override full-intensity screen widths/second (0.15..4)")
     p.add_argument("--confidence", type=float, default=0.65)
     p.add_argument("--smoothing-ms", type=float, default=35)
@@ -102,6 +106,17 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--bow-deadzone", type=float, default=0.045)
     p.add_argument("--tracking-timeout-ms", type=float, default=180)
     return p
+
+
+def has_finger_calibration(calibration) -> bool:
+    return (calibration is not None and calibration.fingers is not None
+            and calibration.fingers.feature_version == FINGER_FEATURE_VERSION)
+
+
+def initial_string(args):
+    if args.string is None:
+        return 1 if args.bow_mode == "assisted" else None
+    return None if args.string == "auto" else ("G", "D", "A", "E").index(args.string)
 
 
 def run(args) -> int:
@@ -120,6 +135,8 @@ def run(args) -> int:
         return 2
     if not 160 <= args.width <= 1920 or not 120 <= args.height <= 1080:
         raise ValueError("Camera dimensions must be 160..1920 by 120..1080")
+    if not .65 <= args.instrument_size <= 1.75:
+        raise ValueError("Instrument size must be 0.65..1.75")
     if not 0 <= args.volume <= 1 or not 0 <= args.effects <= 1 or not 16000 <= args.sample_rate <= 96000 or not 64 <= args.block_size <= 2048:
         raise ValueError("Volume must be 0..1, sample rate 16000..96000, block size 64..2048")
     controls = Controls(confidence=args.confidence, position_tau=args.smoothing_ms / 1000,
@@ -137,8 +154,10 @@ def run(args) -> int:
     except (OSError, ValueError, TypeError, KeyError) as exc:
         report(f"Calibration not usable: {exc}. Existing file kept; please recalibrate.")
     fingering_mode = args.fingering
-    string_override = None if args.string == "auto" else ("G", "D", "A", "E").index(args.string)
-    calibrated = calibration is not None and (fingering_mode == "pointing" or calibration.fingers is not None)
+    string_override = initial_string(args)
+    calibrated = calibration is not None and (fingering_mode == "pointing" or has_finger_calibration(calibration))
+    if fingering_mode == "fingers" and calibration is not None and not has_finger_calibration(calibration):
+        report("Finger detection improved: recalibrate once. Your existing hand identity is preserved.")
     if args.bow_speed is not None:
         calibration = replace(calibration or Calibration(mirrored=mirrored), bow_full_speed=args.bow_speed)
     calibration = calibration or Calibration(mirrored=mirrored)
@@ -171,6 +190,7 @@ def run(args) -> int:
         window, renderer.use_3d = open_window(args.renderer, report)
         if renderer.use_3d:
             window.confidence, window.timeout = controls.confidence, controls.tracking_timeout
+            window.instrument_size = args.instrument_size
         renderer.graphics_label = "3D" if renderer.use_3d else "2D compatibility"
         if not args.silent:
             def start_audio():
@@ -243,7 +263,8 @@ def run(args) -> int:
                     calibrated = True
                     try:
                         save_calibration(args.config, calibration)
-                        report("Calibration saved. Lift/curl left fingers and sweep your right wrist." if fingering_mode == "fingers"
+                        report("Calibration saved. Curl/lift left fingers. Short stroke or Space starts assisted sustain." if fingering_mode == "fingers" and bow_mode == "assisted"
+                               else "Calibration saved. Lift/curl left fingers and sweep your right wrist." if fingering_mode == "fingers"
                                else "Calibration saved. Point with your left index and sweep your right wrist.")
                     except OSError as exc:
                         report(f"Calibration works for this session but was not saved: {exc}")
@@ -337,8 +358,16 @@ def run(args) -> int:
                 audio_loader = ResourceLoader("audio", start_audio)
                 audio_reported, audio_owned = False, False
             elif key == ord("b"):
-                bow_mode = "precision" if bow_mode == "auto" else "auto"
+                modes = ("assisted", "auto", "precision")
+                bow_mode = modes[(modes.index(bow_mode) + 1) % len(modes)]
                 instrument.bow.set_mode(bow_mode)
+                if bow_mode == "assisted" and args.string != "auto" and string_override is None:
+                    string_override = state.string
+                report(f"Bow: {bow_mode}. " + ("Short stroke or Space starts; pinch, Space or 0 stops."
+                       if bow_mode == "assisted" else "Sweep sideways; Precision also requires a pinch."))
+            elif key in (ord(","), ord(".")) and renderer.use_3d:
+                window.instrument_size = max(.65, min(1.75, window.instrument_size + (-.1 if key == ord(",") else .1)))
+                report(f"Violin size: {window.instrument_size:.1f}x")
             elif key == ord("k"):
                 keyboard.bowing, keyboard.stroke_until = False, 0.0
                 if not demo_mode:
@@ -359,11 +388,12 @@ def run(args) -> int:
                 fingering_mode = "pointing" if fingering_mode == "fingers" else "fingers"
                 instrument = Instrument(calibration, controls, bow_mode,
                                         fingering_mode=fingering_mode, string_override=string_override)
-                if fingering_mode == "fingers" and calibration.fingers is None:
+                if fingering_mode == "fingers" and not has_finger_calibration(calibration):
                     wizard = Calibrator(mirrored, args.confidence, mode="fingers", initial=calibration)
                 else:
                     wizard = None
-                report("Finger controls: curl/lift left fingers; right wrist height selects strings." if fingering_mode == "fingers"
+                report("Finger controls: curl/lift left fingers; [ / ] changes string." if fingering_mode == "fingers" and string_override is not None
+                       else "Finger controls: curl/lift left fingers; right wrist height selects strings." if fingering_mode == "fingers"
                        else "Pointing controls: left index selects a screen note.")
             elif key in (ord("["), ord("]")) and not demo_mode and fingering_mode == "fingers" and not wizard:
                 current = state.string if string_override is None else string_override
@@ -374,6 +404,11 @@ def run(args) -> int:
                 report("String selection follows right-wrist height: G / D / A / E, top to bottom.")
             elif wizard and not demo_mode and key == ord(" "):
                 wizard.advance(now)
+            elif not demo_mode and not wizard and bow_mode == "assisted" and control_worker:
+                if key == ord(" "):
+                    control_worker.toggle_assisted()
+                elif key == ord("0"):
+                    control_worker.stop_assisted()
             elif demo_mode:
                 keyboard.key(key, now)
         return 0

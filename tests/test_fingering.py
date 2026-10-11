@@ -2,12 +2,13 @@
 
 from dataclasses import replace
 import math
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 from air_violin.calibration import Calibrator, FINGER_STEPS, STEPS
-from air_violin.config import Calibration, Controls, FingerCalibration, load_calibration, save_calibration
+from air_violin.config import Calibration, Controls, FingerCalibration, load_calibration, save_calibration, FINGER_FEATURE_VERSION
 from air_violin.controller import Instrument
 from air_violin.fingering import Fingering, BowStringSelector, finger_features
 from air_violin.types import Hand, Point, TrackingFrame, mirror_point
@@ -37,6 +38,23 @@ def finger_calibration(**kwargs):
                              finger_features(articulated(15)), **kwargs)
 
 
+def hinged(mask=0, angle=0.22, label="Left"):
+    """Lower each curved finger rigidly at MCP, with PIP/DIP angles unchanged."""
+    source = articulated(0, label)
+    world = list(source.world_points)
+    for index in range(4):
+        if not mask & (1 << index):
+            continue
+        base = 5+index*4
+        origin = world[base]
+        for joint in range(base+1, base+4):
+            point = world[joint]
+            y, z = point.y-origin.y, point.z-origin.z
+            world[joint] = Point(point.x, origin.y+y*math.cos(angle)-z*math.sin(angle),
+                                 origin.z+y*math.sin(angle)+z*math.cos(angle))
+    return replace(source, world_points=tuple(world))
+
+
 class GeometryTests(unittest.TestCase):
     def test_world_curl_changes_every_finger_feature(self):
         lifted = finger_features(articulated())
@@ -49,6 +67,31 @@ class GeometryTests(unittest.TestCase):
         transformed = replace(source, world_points=world, points=tuple(mirror_point(p) for p in source.points))
         for a, b in zip(finger_features(source), finger_features(transformed)):
             self.assertAlmostEqual(a, b)
+
+    def test_gentle_mcp_hinge_is_measurable_without_distal_curl(self):
+        from air_violin.fingering import _angle, _distance
+        source, down = hinged(), hinged(15)
+        for base in (5, 9, 13, 17):
+            for joint in (base+1, base+2):
+                self.assertAlmostEqual(_angle(*source.world_points[joint-1:joint+2]),
+                                       _angle(*down.world_points[joint-1:joint+2]))
+            self.assertAlmostEqual(_distance(source.world_points[base], source.world_points[base+3]),
+                                   _distance(down.world_points[base], down.world_points[base+3]))
+        self.assertTrue(all(b-a >= .045 for a, b in zip(finger_features(source), finger_features(down))))
+
+    def test_world_reflection_translation_preserve_gentle_press(self):
+        source = hinged(9)
+        reflected = replace(source, world_points=tuple(Point(-p.x+.4, p.y-.2, p.z+.1) for p in source.world_points))
+        for a, b in zip(finger_features(source), finger_features(reflected)):
+            self.assertAlmostEqual(a, b)
+
+    def test_degenerate_palm_and_nonfinite_world_are_unknown(self):
+        source = hinged()
+        world = list(source.world_points)
+        world[0] = world[9]
+        self.assertEqual(finger_features(replace(source, world_points=tuple(world))), (None,)*4)
+        world[0] = Point(float("nan"), 0, 0)
+        self.assertEqual(finger_features(replace(source, world_points=tuple(world))), (None,)*4)
 
     def test_missing_world_and_collapsed_joint_are_unknown(self):
         self.assertEqual(finger_features(hand()), (None,)*4)
@@ -72,6 +115,18 @@ class FingeringTests(unittest.TestCase):
                 fingering = Fingering(finger_calibration(dwell=0))
                 expected = mask.bit_length()
                 self.assertEqual(fingering.update(articulated(mask), 1), expected)
+
+    def test_relaxed_curved_open_and_gentle_mcp_presses_play_all_combinations(self):
+        calibration = FingerCalibration(finger_features(hinged()), finger_features(hinged(15)), dwell=0)
+        for mask in range(16):
+            with self.subTest(mask=mask):
+                self.assertEqual(Fingering(calibration).update(hinged(mask), 1), mask.bit_length())
+
+    def test_obsolete_feature_calibration_never_sounds_with_new_measurement(self):
+        legacy = replace(finger_calibration(dwell=0), feature_version=1)
+        fingers = Fingering(legacy)
+        self.assertIsNone(fingers.update(articulated(15), 1))
+        self.assertEqual(fingers.states, [-1]*4)
 
     def test_unknown_higher_finger_never_becomes_open(self):
         fingering = Fingering(finger_calibration(dwell=0))
@@ -154,6 +209,20 @@ class FingerInstrumentTests(unittest.TestCase):
                 self.assertTrue(state.audio.gate)
             self.assertEqual(state.fingering_mode, "fingers")
 
+    def test_gentle_knuckle_only_fingering_changes_d_string_pitch_during_bow(self):
+        calibration = replace(Calibration(version=2), fingers=FingerCalibration(
+            finger_features(hinged()), finger_features(hinged(15)), dwell=0))
+        instrument = Instrument(calibration, Controls(), fingering_mode="fingers", string_override=1)
+        timestamp = 1.0
+        for mask, midi in ((0, 62), (1, 64), (3, 66), (7, 67), (15, 69), (7, 67), (3, 66), (1, 64), (0, 62)):
+            for _ in range(4):
+                timestamp += .04
+                wrist_x = .72+.10*math.sin(timestamp*8)
+                sample = TrackingFrame(timestamp, (hinged(mask), hand("Right", wrist=(wrist_x, .48))))
+                state = instrument.update(sample, timestamp)
+            self.assertEqual(state.audio.midi, midi)
+            self.assertTrue(state.audio.gate)
+
     def test_tracking_loss_releases_within_eighty_ms_then_recovers(self):
         inst = self.make()
         inst.update(self.tracked(inst, 10, 0.60), 10)
@@ -198,10 +267,16 @@ class FingerInstrumentTests(unittest.TestCase):
 
 class FingerCalibrationTests(unittest.TestCase):
     def feed(self, wizard, h, start):
-        for index in range(6):
+        for index in range(26):
             t = start+index*.04
             wizard.observe(TrackingFrame(t, (h,)), t)
-        wizard.advance(start+.20)
+        wizard.advance(start+1.0)
+
+    def verify(self, wizard, start=10, label="Left"):
+        for count, mask in enumerate((15, 7, 3, 1, 0)):
+            for index in range(15):
+                t = start+count*.6+index*.04
+                wizard.observe(TrackingFrame(t, (articulated(mask, label),)), t)
 
     def test_old_config_and_new_config_round_trip(self):
         with TemporaryDirectory() as directory:
@@ -212,6 +287,19 @@ class FingerCalibrationTests(unittest.TestCase):
             new = replace(old, version=2, fingers=finger_calibration())
             save_calibration(path, new)
             self.assertEqual(load_calibration(path, True), new)
+
+    def test_legacy_feature_data_requires_recalibration_but_keeps_hand_binding(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory)/"calibration.json"
+            old = replace(Calibration(version=2), left_label="Right", right_label="Left", fingers=finger_calibration())
+            save_calibration(path, old)
+            data = json.loads(path.read_text())
+            del data["fingers"]["feature_version"]
+            path.write_text(json.dumps(data))
+            loaded = load_calibration(path, True)
+            self.assertEqual(loaded.fingers.feature_version, 1)
+            self.assertEqual(loaded.left_label, "Right")
+            self.assertEqual(loaded.bow, old.bow)
 
     def test_future_calibration_frames_cannot_advance(self):
         wizard = Calibrator(True, mode="fingers")
@@ -234,20 +322,24 @@ class FingerCalibrationTests(unittest.TestCase):
         self.feed(wizard, articulated(0, "Right"), 3)
         for step, mask in enumerate((1, 3, 7, 15), 4):
             self.feed(wizard, articulated(mask, "Right"), step)
-        self.feed(wizard, articulated(0, "Right"), 8)
+        self.feed(wizard, articulated(15, "Right"), 8)
+        self.assertTrue(wizard.verification_active)
+        self.assertEqual(wizard.step, 7)
+        self.verify(wizard, 10, "Right")
         self.assertEqual(wizard.step, 8)
-        self.assertIsNotNone(wizard.value.fingers)
+        self.assertIsNone(wizard.value.fingers)  # Nothing replaces saved data until full success.
         self.assertEqual(wizard.value.left_label, "Right")
-        self.feed(wizard, hand("Left", wrist=(.95, .8)), 9)
-        self.feed(wizard, hand("Left", wrist=(.55, .2)), 10)
+        self.feed(wizard, hand("Left", wrist=(.95, .8)), 14)
+        self.feed(wizard, hand("Left", wrist=(.55, .2)), 16)
         self.assertEqual(wizard.step, 10)
-        self.feed(wizard, hand("Left", pinch=1.5), 11)
-        self.feed(wizard, hand("Left", pinch=.2), 12)
-        self.feed(wizard, hand("Left"), 13)
+        self.feed(wizard, hand("Left", pinch=1.5), 18)
+        self.feed(wizard, hand("Left", pinch=.2), 20)
+        self.feed(wizard, hand("Left"), 22)
         for i in range(1, 100):
-            t = 13.2+i/30
+            t = 23+i/30
             wizard.observe(TrackingFrame(t, (hand("Left", wrist=(.75+.14*math.sin(i/10), .5)),)), t)
         self.assertTrue(wizard.complete)
+        self.assertEqual(wizard.value.fingers.feature_version, FINGER_FEATURE_VERSION)
 
     def test_indistinguishable_finger_poses_and_failed_release_rejected(self):
         wizard = Calibrator(True, mode="fingers")
@@ -259,9 +351,83 @@ class FingerCalibrationTests(unittest.TestCase):
         self.assertIn("too similar", wizard.message)
         for step, mask in enumerate((1, 3, 7, 15), 5):
             self.feed(wizard, articulated(mask), step)
-        self.feed(wizard, articulated(15), 9)
+        self.feed(wizard, articulated(0), 10)
         self.assertEqual(wizard.step, 7)
-        self.assertIn("Lift all four", wizard.message)
+        self.assertIn("all four fingers gently down", wizard.message)
+
+    def test_three_frames_are_not_enough_to_calibrate_fingers(self):
+        wizard = Calibrator(True, mode="fingers")
+        wizard.step = 2
+        for timestamp in (1, 1.04, 1.08):
+            wizard.observe(TrackingFrame(timestamp, (hinged(),)), timestamp)
+        wizard.advance(1.08)
+        self.assertEqual(wizard.step, 2)
+        self.assertIn("one second", wizard.message)
+
+    def test_noisy_pose_window_cannot_be_saved(self):
+        wizard = Calibrator(True, mode="fingers")
+        wizard.step = 2
+        for index in range(26):
+            t = 1+index*.04
+            pose = hinged(1, angle=.35) if index % 2 else hinged()
+            wizard.observe(TrackingFrame(t, (pose,)), t)
+        wizard.advance(2)
+        self.assertEqual(wizard.step, 2)
+        self.assertIsNone(wizard.lifted)
+        self.assertIn("moving or noisy", wizard.message)
+
+    def test_latest_missing_or_degenerate_metric_pose_cannot_save_old_geometry(self):
+        for invalid in (replace(hinged(), world_points=None), articulated(broken=2)):
+            with self.subTest(invalid_world=invalid.world_points is None):
+                wizard = Calibrator(True, mode="fingers")
+                wizard.step = 2
+                for index in range(25):
+                    timestamp = 1+index*.04
+                    wizard.observe(TrackingFrame(timestamp, (hinged(),)), timestamp)
+                wizard.observe(TrackingFrame(2, (invalid,)), 2)
+                wizard.advance(2)
+                self.assertEqual(wizard.step, 2)
+                self.assertIsNone(wizard.lifted)
+                self.assertIn("visible now", wizard.message)
+                # One recovered frame cannot resurrect the old pose window.
+                wizard.observe(TrackingFrame(2.04, (hinged(),)), 2.04)
+                wizard.advance(2.04)
+                self.assertEqual(wizard.step, 2)
+                self.assertIn("one second", wizard.message)
+
+    def test_wrong_cumulative_pose_cannot_advance(self):
+        wizard = Calibrator(True, mode="fingers")
+        wizard.step = 2
+        self.feed(wizard, articulated(), 1)
+        self.feed(wizard, articulated(15), 3)
+        self.assertEqual(wizard.step, 3)
+        self.assertIn("lifted", wizard.message)
+        self.feed(wizard, articulated(1), 5)
+        self.feed(wizard, articulated(2), 7)
+        self.assertEqual(wizard.step, 4)
+        self.assertIn("Keep INDEX down", wizard.message)
+
+    def test_verification_cannot_pass_when_only_open_pose_is_detected(self):
+        wizard = Calibrator(True, mode="fingers")
+        wizard.step = 2
+        self.feed(wizard, articulated(), 1)
+        for step, mask in enumerate((1, 3, 7, 15), 3):
+            self.feed(wizard, articulated(mask), step*2)
+        self.feed(wizard, articulated(15), 16)
+        for index in range(45):
+            t = 18+index*.04
+            wizard.observe(TrackingFrame(t, (articulated(),)), t)
+        self.assertEqual(wizard.step, 7)
+        self.assertEqual(wizard.verification_progress, 0)
+        self.assertIn("target: 4", wizard.verification_note)
+
+    def test_incomplete_recalibration_preserves_previous_finger_data(self):
+        previous = replace(Calibration(version=2), fingers=finger_calibration())
+        wizard = Calibrator(True, mode="fingers", initial=previous)
+        wizard.step = 2
+        self.feed(wizard, hinged(), 1)
+        self.feed(wizard, hinged(1), 3)
+        self.assertIs(wizard.value.fingers, previous.fingers)
 
 
 class DeliveryTimingTests(unittest.TestCase):

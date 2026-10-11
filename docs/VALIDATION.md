@@ -1,4 +1,52 @@
-# Version 0.3.0 validation — 11 October 2026
+# Version 0.3.1 correction validation — 11 October 2026
+
+The user's actual screenshot showed a severed neck, unstable proportions, and
+reported both short sound bursts and pitch stuck on D4. This revision addresses
+the causes; it does not treat cloud screenshots as proof of laptop playability.
+
+| Check | Outcome |
+| --- | --- |
+| Full unittest suite | **170 passed**, zero skips; 3.294 seconds in the full setup run |
+| Complete `bash tools/cloud_setup.sh` | Passed: binary dependencies, imports, `pip check`, models, tests, audio/Tasks/stage/EGL validators |
+| Finger articulation | Pure MCP-only synthetic presses produce D4→E4→F#4→G4→A4 and back without changing bow gating |
+| Calibration | Stable/noise sampling, cumulative pose checks, 4→3→2→1→0 verification, obsolete-feature migration, and incomplete-save preservation pass |
+| Calibration occlusion | Latest missing/degenerate metric landmarks cannot be replaced with old good samples; recovery needs a fresh valid pose window |
+| Assisted sustain | Genuine small stroke starts, fresh stationary frames sustain, notes change, pinch/Space/0 stop, tracking/teleport expiry prevents unintended restart |
+| Automatic strings | Stationary assisted sustain freezes the string; deliberate strokes change it after dwell |
+| Original behavior | Auto/Precision, pointing, mirror/hand binding, state machine, persistent synth, source ownership, fallback and cleanup checks pass |
+| 3D | 17 mesh/pose tests pass; fuller mesh has 28,248 vertices, fixed stage scale, mirrored torso-directed posture, no default palm cutout |
+| Real EGL render | Mesh depth/shading, continuous neck-under-palm pixel probe, texture orientation, stale pose removal, HUD scissor and actual application integration pass |
+| Visual review | Front/side/back model, all four scenes, error/verification calibration and Assisted tutorial captures inspected; synthetic poses explicitly labelled |
+| Physical webcam/audio/Windows | **Unrun here**; live finger discrimination, comfort, graphics performance, and sound quality still need laptop acceptance |
+
+New regressions use synthetic landmarks, not recorded performances. Independent
+review identified the calibration occlusion defect above; it was corrected and
+tested. No physically accurate friction, force, bow/string contact, or palm depth
+is claimed. The additive timbre has not become an acoustic violin model.
+
+Fresh full-setup artifacts report synthesis block median **0.509834 ms**, p95
+**0.651542 ms**, 256 samples/48 kHz (budget **5.333333 ms**), finite peak
+**0.209409**. Real Tasks inference on blank frames passed for both models.
+Person inference median **4.077162 ms**, p95 **5.264065 ms**; CPU stage median
+**6.820008 ms**, p95 **68.746325 ms**, including cold scene construction.
+
+The final expanded graphics validator wrote `artifacts/3d-review/report.json`:
+pyglet 2.1.17, EGL OpenGL 4.5 Mesa llvmpipe, GPU-completion presentation median
+**5.376111 ms**, p95 **6.074247 ms**. The earlier full-setup graphics run measured
+**10.985384 / 12.797334 ms**; timings vary with concurrent work. These component
+measurements exclude camera, gesture dwell, CPU HUD work and device buffering.
+They do not establish laptop 30 FPS or sub-100 ms onset.
+
+On the laptop, update and complete the new calibration. Pass its five-note
+release check; then start Assisted with a short stroke, rest the right hand in
+view, and play the README Ode phrase three times. Verify pinch/Space/0 stops,
+cover-and-return safety, Auto/Precision, whole neck under the palm, stable size,
+and backgrounds on/off over a ten-minute session. The full manual checklist is
+in [README](../README.md).
+
+---
+
+# Historical version 0.3.0 validation — 11 October 2026
 
 Development instance: Linux x86_64, glibc 2.41, CPython 3.12.14. The current
 revision passed automated, real-model API, and actual headless OpenGL checks.

@@ -45,6 +45,29 @@ class ControlWorker:
             self.mode, self.volume, self.enabled = mode, volume, enabled
             self.fingering_mode, self.string_override = fingering_mode, string_override
 
+    def toggle_assisted(self):
+        """Only the active camera owner can start/stop its assisted phrase."""
+        with self.lock:
+            if not self.enabled:
+                return False
+            now = time.perf_counter()
+            # Consume any newly arrived capture before testing gesture freshness.
+            self.instrument.update(self.vision.latest.get(), now, self.volume)
+            sustaining = self.instrument.toggle_assisted(now)
+            state = self.instrument.update(None, now, self.volume)
+            self.latest.put(state)
+            self.bus.publish(state.audio)
+            return sustaining
+
+    def stop_assisted(self):
+        with self.lock:
+            if not self.enabled:
+                return
+            self.instrument.stop_assisted()
+            state = self.instrument.update(None, time.perf_counter(), self.volume)
+            self.latest.put(state)
+            self.bus.publish(state.audio)
+
     def _run(self):
         try:
             while not self.stop.is_set():

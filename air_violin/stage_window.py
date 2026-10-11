@@ -64,12 +64,14 @@ void main() {
     float shine=pow(max(dot(n,normalize(light+vec3(0,0,1))),0.0),32.0);
     vec3 c=material;
     if (material_tag < -0.5) {
-        float grain=sin(object_position.y*115.0+sin(object_position.x*15.0)*2.1);
-        c*=0.97+0.035*grain;
+        // Restrained longitudinal grain and maple figure, not orange stripes.
+        float grain=sin(object_position.x*71.0+sin(object_position.y*1.8)*0.9);
+        float figure=sin(object_position.y*9.0+object_position.x*0.8);
+        c*=0.99+0.009*grain+0.016*figure;
     }
     bool lit_string=material_tag>0.5 && abs(material_tag-active_string)<0.25;
     if (lit_string) c=active_color;
-    c=c*(0.48+0.58*diffuse)+vec3(0.13*shine);
+    c=c*(0.60+0.48*diffuse)+vec3(0.09*shine);
     if (lit_string) c+=active_color*(0.22+0.38*intensity);
     frag=vec4(clamp(c,0.0,1.0),1.0);
 }
@@ -158,6 +160,7 @@ class StageWindow:
         self.closed, self._disposed = False, False
         self._keys = []
         self.confidence, self.timeout = .65, .18
+        self.instrument_size, self.occlusion = 1.0, False
         self._window = None
         self._objects = []
         self._texture = gl.GLuint()
@@ -307,19 +310,23 @@ class StageWindow:
         self._texture_program.use()
         self._quad.draw()
         self.violin_pose = self._violin_tracker.update(tracking, calibration, now, viewport,
-                                                     self.confidence, self.timeout)
+                                                     self.confidence, self.timeout, self.instrument_size)
         self.bow_pose = self._bow_tracker.update(tracking, calibration, now, viewport,
-                                               self.confidence, self.timeout)
+                                               self.confidence, self.timeout, self.instrument_size)
         if draw_instrument:
             if demo:
                 ox, oy, w, h = viewport
-                angle = .48
+                angle = 1.10
                 rotation = np.array(((np.cos(angle), -np.sin(angle), 0),
                                      (np.sin(angle), np.cos(angle), 0), (0, 0, 1)))
-                self.violin_pose = Pose(np.array((ox + w * .44, oy + h * .30, 0.)),
-                                       rotation, h * .12, now)
-                self.bow_pose = Pose(np.array((ox + w * .51, oy + h * .66, 55.)),
-                                    np.eye(3), h * .12, now)
+                scale = min(w * .108, h * .15) * self.instrument_size
+                self.violin_pose = Pose(np.array((ox + w * .30, oy + h * .39, 0.)),
+                                       rotation, scale, now)
+                angle = -2.35
+                bow_rotation = np.array(((np.cos(angle), -np.sin(angle), 0),
+                                         (np.sin(angle), np.cos(angle), 0), (0, 0, 1)))
+                self.bow_pose = Pose(np.array((ox + w * .80, oy + h * .28, 55.)),
+                                    bow_rotation, scale * 1.04, now)
             # Stage-only geometry never covers controls or the performance HUD.
             sx, sy, sw, sh = (20, 64, 880, 500)
             gl.glEnable(gl.GL_SCISSOR_TEST)
@@ -341,13 +348,16 @@ class StageWindow:
                 if selected:
                     marker = np.eye(4)
                     marker[:3, 3] = ((state.string - 1.5) * .05,
-                                       -2.28 + np.clip(state.zone, 0, 7) * .18, .40)
+                                       -2.28 + np.clip(state.zone, 0, 7) * .18, .42)
                     self._draw_mesh(self._marker, model @ marker)
             if self.bow_pose is not None:
                 self._draw_mesh(self._bow, model_matrix(self.bow_pose, cw, ch))
             gl.glDisable(gl.GL_DEPTH_TEST)
             self._texture_program.use()
-            if not demo:
+            # The camera is monocular: a palm hull has no depth. Cutting out
+            # its entire bounding region severed the user's violin neck. Keep
+            # the complete model unless coarse occlusion is explicitly enabled.
+            if self.occlusion and not demo:
                 self._occlude_palms(tracking, calibration, now, viewport)
             gl.glDisable(gl.GL_SCISSOR_TEST)
         self._window.flip()

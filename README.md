@@ -1,8 +1,8 @@
 # Air Violin Studio — finger-controlled visual studio
 
-A local Python desktop instrument played with two bare hands. Version **0.3.0**
-adds calibrated four-finger stopping gestures, a hand-anchored 3D violin and bow,
-richer procedural backgrounds, and visible device-loading progress. The audio
+A local Python desktop instrument played with two bare hands. Version **0.3.1**
+corrects knuckle-based finger detection, adds relaxed assisted sustain, and
+rebuilds the 3D violin with stable size, fuller proportions, and a continuous neck. The audio
 stream, hand tracking, and optional person segmentation run independently of
 stage rendering. No cloud connection is required after installation.
 
@@ -37,9 +37,10 @@ git pull --ff-only
 .\Setup-Air-Violin.cmd
 ```
 
-The new renderer dependency requires updating packages. Your saved physical
-left/right binding is retained, but **finger mode needs its new calibration**;
-old pointing calibration does not define finger-down poses.
+Your saved physical left/right binding is retained, but **finger mode needs one
+new calibration** for the corrected knuckle measurement. Older finger settings
+are not reused with the new math. The saved file is replaced only after all
+calibration steps succeed. There are no new dependencies in 0.3.1.
 
 The equivalent manual setup is:
 
@@ -69,7 +70,8 @@ Extra arguments are passed to the app:
 
 ```powershell
 .\Play-Air-Violin.cmd --scene nebula
-.\Play-Air-Violin.cmd --string D
+.\Play-Air-Violin.cmd --instrument-size 1.2
+.\Play-Air-Violin.cmd --bow-mode auto --string auto
 .\Play-Air-Violin.cmd --demo
 .\Play-Air-Violin.cmd --backend dshow
 .\Play-Air-Violin.cmd --renderer 2d --quality low
@@ -81,13 +83,13 @@ The direct launch command remains:
 .\.venv\Scripts\python.exe -m air_violin
 ```
 
-Default controls use **finger mode** and the automatic renderer choice. Use
+Default controls use **finger mode, Assisted Bow, a fixed D string**, and the automatic renderer choice. Use
 `--fingering pointing` for the previous index-tip grid, or `--renderer 2d` for
 the lightweight visual fallback. Device progress appears while the camera,
 audio, and models initialize. A blocked camera driver cannot be forcibly
 unblocked by Python; close competing camera apps and try another backend.
-For the first finger-playing session, `--string D` keeps string selection fixed
-while you learn the five stopping gestures.
+Use **[ / ]** to select another string. `--string auto` enables bow-height string
+selection; `--bow-mode auto` returns to continuous physical strokes.
 Windows defaults to the DirectShow camera backend; `--backend msmf` or
 `--backend auto` are alternatives if that driver fails.
 
@@ -99,7 +101,7 @@ with the left palm/fingers mostly facing the camera. The intended pose is an
 curved. A tightly closed fist or fingers hidden behind one another is unsuitable
 for reliable webcam recognition.
 
-Finger mode has 13 guided steps. Hold each requested pose steady, then press
+Finger mode has 13 guided steps. Hold each requested finger pose for about one second, then press
 **Space** when the preview is ready:
 
 1. Raise only your **physical left hand** to bind its role.
@@ -109,7 +111,9 @@ Finger mode has 13 guided steps. Hold each requested pose steady, then press
 5. Left: index and middle down; ring/little lifted.
 6. Left: index, middle, and ring down; little lifted.
 7. Left: all four fingers down, using gentle curls rather than a fist.
-8. Left: lift all four again to verify release.
+8. Begin with all four down; press Space to start the check. Lift little, ring,
+   middle, then index in order, pausing briefly at each note. The check must
+   detect **4 → 3 → 2 → 1 → 0** before advancing automatically. No bow is needed.
 9. Right: place the wrist at a comfortable corner of the bowing region.
 10. Right: place it at the opposite corner. Either corner order is accepted;
     allow at least 24% of image height for the four string bands.
@@ -118,8 +122,10 @@ Finger mode has 13 guided steps. Hold each requested pose steady, then press
 13. Press Space, then sweep the right wrist horizontally for three seconds at
     a comfortable speed to calibrate bow intensity.
 
-If a finger's lifted/down poses are too similar, calibration explains which
-pose to retry. **C** recalibrates at any time. Both display and inference use the
+Lower the finger gently at its **base knuckle**, keeping your grip stable; a deep
+curl or closed fist is unnecessary. Calibration checks stable samples, pose
+separation, and the actual note transitions. If a pose is too similar or noisy,
+it explains which pose to retry. **C** recalibrates at any time. Both display and inference use the
 same mirrored pixels; physical hand roles come from calibration, not screen
 position or an assumed MediaPipe label. Changing `--no-mirror` requires new
 calibration.
@@ -148,16 +154,26 @@ are a simplified quantized preset, not every violin scale or continuous
 intonation. The preview changes before bowing; moving the left hand around the
 screen is unnecessary in finger mode.
 
-The **right wrist's height** selects strings inside its calibrated bowing
-region: top to bottom **G, D, A, E**. Horizontal wrist motion controls the bow.
-Press **[ / ]** to choose and lock a string, then **\** to restore automatic
-height selection. Start by locking D while learning the finger gestures.
+**Assisted Bow (default):** keep the right thumb/index apart. A short horizontal
+stroke inside the calibrated bowing area starts a sustained phrase. Alternatively,
+press **Space** with both hands tracked and the right wrist in the area. Rest
+the right hand anywhere inside the camera view; change notes with the left
+fingers. **Pinch right thumb/index, Space, or 0** stops the phrase. Losing valid
+tracking also releases sound; returning to view requires a new stroke or Space.
+This is an ergonomic sustain aid, not a model of a real stationary bow.
 
-**Auto Bow:** move the right wrist horizontally inside the region. Speed changes
-loudness and brightness. **Precision Bow:** do the same while pinching right
-thumb/index. **B** switches schemes. Stopping, leaving the region, releasing the
-pinch, or losing valid tracking releases sound safely. Brief reversal pauses
-are bridged; pitch changes do not restart the oscillator or audio device.
+**Auto Bow:** sound follows horizontal strokes inside the region. **Precision
+Bow:** strokes sound only while right thumb/index are pinched. **B** cycles
+Assisted → Auto → Precision. In the stroke modes, stopping, leaving the region,
+or releasing Precision's pinch releases sound naturally. Brief reversals are
+bridged. All modes change pitch without reopening the audio device.
+
+D is locked by default in Assisted so lowering your right arm cannot change the
+string. **[ / ]** changes the locked string; **\** or `--string auto` enables
+right-wrist height bands **G, D, A, E**, top to bottom. In Assisted, deliberate
+horizontal strokes can change the height-selected string; stationary sustain
+holds it. The four finger indicators show measured press percentages: roughly
+0% lifted, 100% down, and `--` when the feature is unknown.
 
 Try this D-string Ode to Joy phrase, using finger numbers:
 
@@ -166,7 +182,10 @@ F# F# G A | A G F# E | D D E F# | F# E E
  2  2 3 4 | 4 3  2 1 | 0 0 1  2 |  2 1 1
 ```
 
-Use separate gentle strokes for repeated notes. In pointing mode, the previous
+Assisted connects held notes into a phrase. To articulate repeated notes,
+stop/start with Space or pinch/stroke, or choose Auto for separate strokes.
+Simply holding the same fingering cannot create separate rhythmic notes.
+In pointing mode, the previous
 four-row/five-column grid remains available; its columns are numbered 1–5.
 
 ## Stage, 3D instrument, and controls
@@ -183,10 +202,16 @@ Custom JPG/PNG backgrounds are center-cropped to cover without stretching:
 ```
 
 The 3D violin is an original mesh with depth and shading, anchored near the
-left thumb/index grip. The bow follows the right grip. Hand-relative geometry
-helps estimate orientation; overall scale/depth are approximate. This does not
+left thumb/index grip, with the body extending diagonally toward the torso.
+Size is relative to the stage rather than palm width, so curling fingers does
+not shrink the violin. **Comma / period** adjusts size; `--instrument-size 1.2`
+sets the launch size (0.65–1.75). The bow follows the right grip and aims toward
+the violin body. Hand-relative geometry helps estimate depth/tilt. This does not
 reconstruct shared 3D bow-string contact or exact finger occlusion. The logical
 musical controls remain independent of the decorative instrument.
+The old palm-hull cutout is disabled because it could erase the middle of the
+neck. The mesh can draw in front of a hand; that is preferable to pretending a
+coarse palm polygon supplies accurate depth.
 The native stage uses **pyglet 2.1.17** and requests **OpenGL 3.3**. Automatic
 mode falls back to 2D when the graphics context is unavailable; Windows driver
 support still needs testing on your laptop.
@@ -197,7 +222,9 @@ support still needs testing on your laptop.
 | K | Camera / keyboard source; stop demo bow |
 | J | Finger / pointing controls |
 | [ / ], \ | Camera: lock string down/up; restore automatic string selection |
-| B | Auto / Precision Bow |
+| B | Assisted / Auto / Precision Bow; switching stops the previous phrase |
+| Space / 0 | Camera Assisted: sustain toggle / stop; start needs fresh tracked hands |
+| , / . | Decrease/increase 3D violin size |
 | C | Recalibrate in camera mode |
 | G | Show/hide teaching and bow-region guides |
 | S | Cycle Studio, Nebula, Midnight Rain, Forest of Light, custom image |
@@ -276,8 +303,9 @@ latest camera frame -> MediaPipe hand worker -> image + hand-relative 3D landmar
 latest camera frame -> person segmenter -> scene/person composition -> stage renderer
 ```
 
-- **Finger geometry:** PIP/DIP joint bends and tip-to-base shortening are computed
-  in MediaPipe's predicted metric hand coordinates. Palm translation and camera
+- **Finger geometry:** base-knuckle flexion, tip height above the palm plane,
+  distal bends, and shortening are computed in MediaPipe's predicted metric
+  hand coordinates. Palm translation and camera
   image location do not determine the note. Calibrated lifted/down endpoints
   turn those measurements into activation scores.
 - **Stability:** scores smooth over elapsed time; separate down/up thresholds and
@@ -288,7 +316,8 @@ latest camera frame -> person segmenter -> scene/person composition -> stage ren
   `55, 62, 69, 76`. The same five Easy offsets remain available in both controls.
 - **Bow:** `vx = (x_now - x_previous)/dt`, in image widths per second. Smoothed
   speed controls intensity; a deadzone rejects jitter. Pinch distance is divided
-  by palm width, with separate engage/disengage thresholds.
+  by palm width, with separate engage/disengage thresholds. Assisted latches
+  sustain after a genuine small excursion; a stationary real bow would be silent.
 - **Sound:** up to 24 band-limited harmonics, designed body coloration, restrained
   friction noise, smooth intensity and phase-continuous pitch transitions.
   Audio attack/release use exponential envelopes. No inference, disk access, or
@@ -334,12 +363,16 @@ Before calling this playable on your laptop:
 3. Lock D. Check open, index, middle, ring, little individually and in cumulative
    combinations. Lift the highest finger to expose the next lower one. Play the
    phrase three times without using screen pointing.
-4. Hold each finger pose for 20 seconds with mild natural movement. No repeated
-   pitch flicker. Cover a hand: prompt release, safe recovery, no velocity spike.
+4. In Assisted, start with one short stroke, then rest the right hand in view
+   for 20 seconds while changing all five notes. Repeat with Space. Check pinch,
+   Space, and 0 stop reliably; returning a covered hand must not resume sound.
 5. Restore automatic string selection. Bow horizontally at each wrist-height
-   band without accidental crossings. Compare Auto and Precision modes.
+   band without accidental crossings. Resting Assisted must hold its string.
+   Compare Auto and Precision stops/reversals; hold left poses without flicker.
 6. Move and gently rotate the left grip: violin neck stays near the grip. Move
-   the right grip: bow follows. Cover a hand: its tracked visual must disappear.
+   the right grip: bow follows toward the body. Curling must not shrink the mesh
+   or remove a section of its neck. Check comma/period size controls. Cover a
+   hand: its tracked visual must disappear.
 7. Compare 3D/backgrounds on and off with D diagnostics visible. Tracking age and
    underruns must remain acceptable. If worse, use LOW, 2D, or original camera.
 8. Try S/V/G/F/M controls, a custom image, missing model/image paths, and a
@@ -359,10 +392,12 @@ is claimed.
 | Missing packages after update | Close the app and run Setup-Air-Violin.cmd. |
 | Camera takes a long time / unavailable | Read the loading stage. Close other camera apps, permit desktop-camera access, try `--backend dshow`, then `msmf`, or `--camera 1`. |
 | 3D cannot initialize | Use `--renderer 2d`, update the graphics driver, and retain the error for diagnosis. |
-| Fingers cannot calibrate / unstable | Improve lighting, face the palm toward the camera, separate lifted/down poses, avoid a fist or overlapping fingertips. C retries; J restores pointing. |
+| Fingers stay on D4 / cannot calibrate | C: redo the new knuckle-based calibration. Gently lower at the base joint, keep the palm visible, and pass the 4→3→2→1→0 check. Inspect the four press percentages. J restores pointing. |
 | Wrong physical hand | C: identify hands separately. Do not infer physical role from screen side. |
 | Accidental string changes | Lock with [ / ]; leave enough vertical bow room and stay away from band borders. |
-| Sound from stationary wrist | Increase `--bow-deadzone`; make wrist landmarks clearly visible. |
+| Sound continues while wrist rests | Expected in Assisted. Pinch, Space or 0 stops. B selects Auto for stroke-dependent sound. In Auto, improve landmark visibility or increase `--bow-deadzone`. |
+| Bow sound stops too quickly / tiring | Use Assisted (default). Start with a short stroke or Space and keep both hands visible; rest the right arm. Tracking loss still releases safely. |
+| Violin too small / neck disappears | Update to 0.3.1. Comma/period or `--instrument-size 1.2` adjusts size. The destructive palm cutout is disabled. |
 | No sound / underruns | Check OS output/volume; list devices and select `--device`; try `--block-size 512` and compare demo. |
 | Missing model / sidecar | Run setup; for corruption or a missing sidecar run `tools/fetch_model.py --all --force` with the venv Python. |
 | Background cutout flickers | Use front lighting, P/LOW, or V/original camera; fast fingers remain a model limitation. |

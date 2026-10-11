@@ -16,9 +16,10 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from air_violin.config import Calibration
+from air_violin.config import Calibration, FingerCalibration
 from air_violin.scenes import SceneEngine
 from air_violin.stage_window import StageWindow
+from air_violin.mesh3d import Pose, VIOLIN_GRIP, model_matrix, perspective_matrix, make_violin_mesh
 from air_violin.types import AudioState, Hand, MusicalState, PlayState, Point, TrackingFrame
 
 
@@ -48,11 +49,12 @@ def integrated_captures(stage, output, calibration, state, source=None):
     """Exercise the application's real CPU HUD through the native GL window."""
     from air_violin.audio import AudioEngine, StateBus
     from air_violin.calibration import Calibrator
+    from air_violin.fingering import Fingering, finger_features
     from air_violin.render import Renderer
     audio = AudioEngine(StateBus())  # No sound device is opened by this check.
     state = replace(state, finger=Point(.29, .24), wrist=Point(.75, .73),
                     fingering_mode="fingers", finger_states=(1, 1, 1, 0),
-                    finger_scores=(1., 1., 1., 0.))
+                    finger_scores=(1., 1., 1., 0.), bow_sustaining=True)
     for scene in ("studio", "nebula", "midnight-rain", "forest-of-light"):
         renderer = Renderer(scene=scene, quality="high", reduced_motion=True)
         renderer.use_3d, renderer.guides, renderer.debug = True, False, True
@@ -61,7 +63,7 @@ def integrated_captures(stage, output, calibration, state, source=None):
         tracking = synthetic_hands(now, tilt=.35)
         current = replace(state, audio=replace(state.audio, timestamp=now))
         canvas = renderer.draw(source, current, calibration, tracking, None, False,
-                               "auto", audio, notice="Synthetic pose / headless GL validation")
+                               "assisted", audio, notice="Synthetic pose / headless GL validation")
         stage.present(canvas, tracking, calibration, current, now,
                       viewport=renderer.camera_viewport)
         stage.capture(output / f"integrated-{scene}-3d.png")
@@ -73,10 +75,57 @@ def integrated_captures(stage, output, calibration, state, source=None):
     tracking = synthetic_hands(now)
     wizard.observe(tracking, now)
     canvas = renderer.draw(source, state, calibration, tracking, wizard, False,
-                           "auto", audio, notice="Synthetic calibration / no webcam")
+                           "assisted", audio, notice="Synthetic calibration / no webcam")
     stage.present(canvas, tracking, calibration, state, now, draw_instrument=False,
                   viewport=renderer.camera_viewport)
     stage.capture(output / "integrated-finger-calibration.png")
+    # Exercise the longer verification instruction and the new tutorial at
+    # actual desktop dimensions; neither may draw the mesh over its text.
+    wizard.step = 7
+    wizard.lifted = finger_features(tracking.hands[0])
+    wizard.pressed = [v + .3 for v in wizard.lifted]
+    wizard.candidate_fingers = FingerCalibration(wizard.lifted, tuple(wizard.pressed))
+    wizard.check = Fingering(wizard.candidate_fingers)
+    wizard.check.note = 4
+    wizard.verification_active, wizard.verification_progress = True, 1
+    canvas = renderer.draw(source, state, calibration, tracking, wizard, False,
+                           "assisted", audio, notice="Synthetic guided verification / no webcam")
+    stage.present(canvas, tracking, calibration, state, time.perf_counter(), draw_instrument=False,
+                  viewport=renderer.camera_viewport)
+    stage.capture(output / "integrated-finger-verification.png")
+    canvas = renderer.draw(source, state, calibration, tracking, None, False,
+                           "assisted", audio, help_visible=True,
+                           notice="Synthetic tutorial / no webcam")
+    stage.present(canvas, tracking, calibration, state, time.perf_counter(), draw_instrument=False,
+                  viewport=renderer.camera_viewport)
+    stage.capture(output / "integrated-assisted-help.png")
+
+
+def model_gallery(stage, output, calibration, state):
+    """Inspect real mesh thickness from three directions, with a complete neck."""
+    class Fixed:
+        def __init__(self, pose):
+            self.pose = pose
+
+        def update(self, *args):
+            return self.pose
+
+    old_violin, old_bow = stage._violin_tracker, stage._bow_tracker
+    canvas = np.full((710, 920, 3), (25, 29, 35), np.uint8)
+    try:
+        for name, angle in (("front", .0), ("side", 1.35), ("back", np.pi)):
+            now = time.perf_counter()
+            rotation = np.array(((np.cos(angle), 0, np.sin(angle)),
+                                 (0, 1, 0), (-np.sin(angle), 0, np.cos(angle))))
+            pose = Pose(np.array((460., 215., 0.)), rotation, 77., now)
+            stage._violin_tracker, stage._bow_tracker = Fixed(pose), Fixed(None)
+            frame = canvas.copy()
+            cv2.putText(frame, f"ORIGINAL 4/4 MESH / {name.upper()}", (24, 38),
+                        cv2.FONT_HERSHEY_SIMPLEX, .65, (224, 229, 238), 1, cv2.LINE_AA)
+            stage.present(frame, None, calibration, state, now)
+            stage.capture(output / f"complete-model-{name}.png")
+    finally:
+        stage._violin_tracker, stage._bow_tracker = old_violin, old_bow
 
 
 def validate(output, image_path=None):
@@ -92,6 +141,7 @@ def validate(output, image_path=None):
                          left_fresh=True, right_fresh=True)
     stage = StageWindow(headless=True, visible=False)
     try:
+        assert stage.occlusion is False
         stage.present(canvas, None, calibration, state, time.perf_counter(), draw_instrument=False)
         actual = stage.read_pixels()
         # Detect flipped rows or RGB/BGR confusion in the real uploaded texture.
@@ -135,6 +185,16 @@ def validate(output, image_path=None):
             assert stage.violin_pose is not None and stage.bow_pose is not None
             rendered = stage.read_pixels()
             assert np.count_nonzero(np.any(rendered != frame, axis=2)) > 1000
+            if scene == "studio":
+                # The neck under the palm remains geometry, not a camera-texture
+                # cutout. This directly regresses the user's severed-neck image.
+                local = np.array((0., VIOLIN_GRIP[1] + .20, .355, 1.))
+                point = model_matrix(stage.violin_pose, 920, 710, VIOLIN_GRIP) @ local
+                point[2] -= 1100.
+                clip = perspective_matrix(920, 710) @ point
+                clip /= clip[3]
+                x, y = round((clip[0] + 1) * 460), round((1 - clip[1]) * 355)
+                assert np.max(np.abs(rendered[y, x].astype(int) - frame[y, x].astype(int))) > 8
             # Geometry cannot draw over the performance strip or upper header.
             assert np.array_equal(rendered[570:620, 20:900], frame[570:620, 20:900])
             stage.capture(output / f"{scene}-3d.png")
@@ -151,12 +211,16 @@ def validate(output, image_path=None):
         stage._window.dispatch_event("on_key_press", key.ENTER, 0)
         assert 13 in stage.poll()
         integrated_captures(stage, output, calibration, state, source)
+        model_gallery(stage, output, calibration, state)
         report = {"pyglet": stage.pyglet.version,
                   "graphics_renderer": stage.renderer_name,
                   "opengl_version": stage.renderer_version,
                   "mode": "headless EGL; synthetic poses; no camera/audio hardware",
                   "texture_orientation": "PASS",
                   "mesh_depth_and_shading": "PASS: actual vertex/index meshes rendered",
+                  "model_vertices": int(len(make_violin_mesh().vertices)),
+                  "model_gallery": "PASS: complete front, side, back views",
+                  "neck_cutout_regression": "PASS: coarse palm occlusion off by default",
                   "tracking_timeout": "PASS",
                   "hud_scissor": "PASS",
                   "application_hud_integration": "PASS: actual Renderer.draw + native GL",

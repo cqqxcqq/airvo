@@ -5,7 +5,7 @@ does not report reliable per-finger visibility; degenerate geometry is unknown.
 """
 
 import math
-from .config import Controls, FingerCalibration, Rect
+from .config import Controls, FingerCalibration, Rect, FINGER_FEATURE_VERSION
 from .types import Hand, Point
 
 FINGER_JOINTS = ((5, 6, 7, 8), (9, 10, 11, 12),
@@ -24,11 +24,24 @@ def _angle(a: Point, joint: Point, b: Point) -> float:
     return math.acos(max(-1.0, min(1.0, sum(x*y for x, y in zip(u, v)) / denominator)))
 
 
-def finger_features(hand: Hand) -> tuple[float | None, ...]:
-    """Return rotation/scale-invariant curl measurements in metric hand space.
+def _vector(a: Point, b: Point) -> tuple[float, float, float]:
+    return b.x-a.x, b.y-a.y, b.z-a.z
 
-    Joint bend dominates; tip-to-base shortening adds a weaker second cue. Never
-    combine normalized image x/y with its wrist-relative z in Euclidean angles.
+
+def _dot(a: tuple[float, ...], b: tuple[float, ...]) -> float:
+    return sum(x*y for x, y in zip(a, b))
+
+
+def finger_features(hand: Hand) -> tuple[float | None, ...]:
+    """Measure a gentle finger press, including motion at its knuckle (MCP).
+
+    A violin-like press can lower an already curved finger without changing its
+    PIP/DIP angles. The previous feature missed that entire movement. A local
+    palm plane separates knuckle flexion from finger spreading and camera roll.
+    All cues use metric world landmarks, never mixed image x/y and relative z.
+    Absolute palm-normal height makes reflecting the hand preserve the feature;
+    calibration determines whether a user's comfortable press increases or
+    decreases it. These are pose estimates, not pressure measurements.
     """
     points = hand.world_points
     if points is None or len(points) != 21:
@@ -38,6 +51,15 @@ def finger_features(hand: Hand) -> tuple[float | None, ...]:
     palm = _distance(points[5], points[17])
     if not 0.020 <= palm <= 0.160 or _distance(points[0], points[9]) < 0.012:
         return (None,) * 4
+    across = _vector(points[17], points[5])
+    forward = _vector(points[0], points[9])
+    cross = (across[1]*forward[2]-across[2]*forward[1],
+             across[2]*forward[0]-across[0]*forward[2],
+             across[0]*forward[1]-across[1]*forward[0])
+    norm = math.sqrt(_dot(cross, cross))
+    if norm < palm*_distance(points[0], points[9])*0.20:
+        return (None,) * 4
+    normal = tuple(v/norm for v in cross)
     values = []
     for joints in FINGER_JOINTS:
         base, pip, dip, tip = (points[i] for i in joints)
@@ -45,9 +67,19 @@ def finger_features(hand: Hand) -> tuple[float | None, ...]:
         if any(not 0.002 <= length <= 0.080 for length in lengths):
             values.append(None)
             continue
-        bend = 1.0 - (_angle(base, pip, dip) + _angle(pip, dip, tip)) / (2 * math.pi)
+        knuckle_axis = _vector(points[0], base)
+        along_plane = tuple(v-_dot(knuckle_axis, normal)*n for v, n in zip(knuckle_axis, normal))
+        along_norm = math.sqrt(_dot(along_plane, along_plane))
+        if along_norm < 0.012:
+            values.append(None)
+            continue
+        along = tuple(v/along_norm for v in along_plane)
+        first = _vector(base, pip)
+        mcp_flexion = math.atan2(abs(_dot(first, normal)), _dot(first, along))
+        distal_bend = math.pi - (_angle(base, pip, dip) + _angle(pip, dip, tip))/2
+        height = abs(_dot(_vector(base, tip), normal))/sum(lengths)
         shortening = 1.0 - _distance(base, tip) / sum(lengths)
-        values.append(0.75 * bend + 0.25 * shortening)
+        values.append(0.65*mcp_flexion + 0.20*distal_bend + 0.10*height + 0.05*shortening)
     return tuple(values)
 
 
@@ -102,7 +134,7 @@ class Fingering:
     def update(self, hand: Hand, timestamp: float) -> int | None:
         if timestamp <= self.timestamp:
             return self.note
-        if self.calibration is None:
+        if self.calibration is None or self.calibration.feature_version != FINGER_FEATURE_VERSION:
             self.uncertain(timestamp)
             return None
         features = finger_features(hand)

@@ -35,7 +35,15 @@ class Instrument:
             raise ValueError("String override must be G/D/A/E index 0..3 or None")
         self.string_override = string
 
+    def toggle_assisted(self, now: float) -> bool:
+        return self.bow.toggle_assisted(now)
+
+    def stop_assisted(self) -> None:
+        self.bow.stop_assisted()
+
     def update(self, frame: TrackingFrame | None, now: float, volume: float = 0.65) -> MusicalState:
+        if frame is not None and frame.timestamp < self.last_frame:
+            self.bow.stop_assisted()
         if frame is not None and self.last_frame < frame.timestamp <= now:
             self.last_frame = frame.timestamp
             if now - frame.timestamp <= self.controls.tracking_timeout:
@@ -61,14 +69,21 @@ class Instrument:
                     self.fingering.uncertain(frame.timestamp)
                 if right:
                     self.last_right = frame.timestamp
-                    self.bow.update(right, frame.timestamp)
-                    self.strings.update(right.points[0], frame.timestamp)
+                    bow = self.bow.update(right, frame.timestamp)
+                    if (self.bow.mode != "assisted" or not bow.sustaining
+                            or (bow.moving and abs(bow.raw_velocity) > self.controls.deadzone)):
+                        self.strings.update(right.points[0], frame.timestamp)
+                    else:
+                        # Lowering a resting assisted hand is ergonomic, not a
+                        # string change. Only new horizontal strokes accrue dwell.
+                        self.strings.pending = None
         left_fresh = now - self.last_left <= self.controls.tracking_timeout
         right_fresh = now - self.last_right <= self.controls.tracking_timeout
         if not left_fresh:
             self.board.reset()
             self.fingering.reset()
             self.finger_point = None
+            self.bow.stop_assisted()
         if not right_fresh:
             self.bow.reset()
         if self.fingering_mode == "fingers":
@@ -83,10 +98,16 @@ class Instrument:
             selected_point = self.board.point
         if midi is not None:
             self.last_midi = midi
+        elif self.last_midi is not None:
+            # Once a played fingering expires, the old assisted phrase cannot
+            # restart itself when an occluded hand happens to return.
+            self.bow.stop_assisted()
         bow = self.bow.state
         # Also expire the motion grace when inference produces no new results.
-        gate = (midi is not None and left_fresh and right_fresh and bow.engaged and bow.moving
-                and now - self.bow.last_motion <= self.controls.reversal_grace+self.delivery_age)
+        physical_motion = (bow.moving and now-self.bow.last_motion
+                           <= self.controls.reversal_grace+self.delivery_age)
+        bow_active = bow.sustaining if self.bow.mode == "assisted" else physical_motion
+        gate = (midi is not None and left_fresh and right_fresh and bow.engaged and bow_active)
         if gate:
             self.phase = PlayState.BOWING
         elif self.phase == PlayState.BOWING:
@@ -108,4 +129,4 @@ class Instrument:
                             selected_point,
                             bow.wrist, tuple(self.fingering.states) if self.fingering_mode == "fingers" else (),
                             tuple(self.fingering.scores) if self.fingering_mode == "fingers" else (),
-                            self.fingering_mode)
+                            self.fingering_mode, bow.sustaining)

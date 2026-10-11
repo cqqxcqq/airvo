@@ -3,8 +3,8 @@
 from dataclasses import replace
 import math
 import statistics
-from .config import Calibration, FingerCalibration, Rect
-from .fingering import finger_features, FINGER_NAMES
+from .config import Calibration, FingerCalibration, Rect, FINGER_FEATURE_VERSION
+from .fingering import finger_features, FINGER_NAMES, Fingering
 from .types import Hand, Point, TrackingFrame
 
 STEPS = (
@@ -20,12 +20,12 @@ STEPS = (
 )
 
 FINGER_STEPS = STEPS[:2] + (
-    ("Left fingers: comfortably lifted", "Hold LEFT hand like a violin grip, palm visible; all four fingers lifted.", "Keep a natural gentle curve. SPACE records your open pose."),
-    ("Left finger 1: INDEX down", "Lower/curl LEFT index as if stopping a string; other fingers lifted.", "Hold the pose still, then press SPACE."),
-    ("Left finger 2: MIDDLE down", "Keep index down and lower/curl LEFT middle finger.", "Ring and little remain lifted. Hold still, then SPACE."),
-    ("Left finger 3: RING down", "Keep index and middle down; lower/curl LEFT ring finger.", "Little finger remains lifted. Hold still, then SPACE."),
-    ("Left finger 4: LITTLE down", "Keep the lower fingers down; lower/curl LEFT little finger.", "Use a relaxed grip rather than a tight fist. Hold still, then SPACE."),
-    ("Left fingers: release check", "Lift all four fingers back to your original relaxed open pose.", "SPACE checks that lifting returns to the open string."),
+    ("Left fingers: comfortably lifted", "Hold LEFT hand like a violin grip, palm visible; all four fingers lifted.", "Keep a gentle curve. Hold 1 second, then SPACE."),
+    ("Left finger 1: INDEX down", "Lower LEFT index at its knuckle; other fingers lifted.", "A gentle press is enough. Hold 1 second, then SPACE."),
+    ("Left finger 2: MIDDLE down", "Keep index down and gently lower LEFT middle finger.", "Ring and little remain lifted. Hold 1 second, then SPACE."),
+    ("Left finger 3: RING down", "Keep index and middle down; gently lower LEFT ring finger.", "Little remains lifted. Hold 1 second, then SPACE."),
+    ("Left finger 4: LITTLE down", "Keep lower fingers down; gently lower LEFT little finger.", "No fist needed. Hold 1 second, then SPACE."),
+    ("Left fingers: play-back check", "Begin with all four fingers down. SPACE starts the check.", "Then lift LITTLE, RING, MIDDLE, INDEX in that order."),
 ) + STEPS[4:]
 
 
@@ -42,7 +42,14 @@ class Calibrator:
         if mode == "fingers":
             self.value = replace(self.value, version=2)
         self.lifted = None
+        self.lifted_noise = None
         self.pressed = []
+        self.pressed_noise = []
+        self.candidate_fingers: FingerCalibration | None = None
+        self.check: Fingering | None = None
+        self.verification_active = False
+        self.verification_progress = 0
+        self.verification_since: float | None = None
         self.message = ""
         self.corner: Point | None = None
         self.open_pinch = 0.0
@@ -80,12 +87,52 @@ class Calibrator:
                 scores.append((feature-self.lifted[index])/(self.pressed[index]-self.lifted[index]))
         return tuple(scores)
 
+    @property
+    def verification_note(self) -> str:
+        if not self.verification_active:
+            return ""
+        target = 4-self.verification_progress
+        cue = ("Keep all four fingers down" if target == 4 else
+               f"Lift {FINGER_NAMES[target]}; keep lower fingers down" if target else
+               "Lift INDEX; all four fingers comfortably lifted")
+        detected = self.check.note if self.check is not None else None
+        return f"{cue}. Detected: {'unknown' if detected is None else detected}; target: {target}"
+
+    @property
+    def progress_message(self) -> str:
+        if self.verification_active:
+            return self.verification_note
+        if self.mode == "fingers" and 2 <= self.step <= 6:
+            span = self.recent[-1].timestamp-self.recent[0].timestamp if self.recent else 0.0
+            return f"Stable pose sample: {min(1.0, span):.1f}/1.0 seconds; SPACE records"
+        return self.message
+
     def observe(self, frame: TrackingFrame | None, now: float) -> None:
         if frame is None or not 0 <= now - frame.timestamp <= 0.18:
             return
         if not self.recent or frame.timestamp > self.recent[-1].timestamp:
             self.recent.append(frame)
-            self.recent = [f for f in self.recent if frame.timestamp - f.timestamp <= 0.45]
+            window = 1.15 if self.mode == "fingers" and 2 <= self.step <= 7 else 0.45
+            self.recent = [f for f in self.recent if frame.timestamp - f.timestamp <= window]
+        if self.verification_active:
+            hand = frame.hand(self.value.left_label, self.confidence)
+            detected = self.check.update(hand, frame.timestamp) if hand else None
+            if hand is None:
+                self.check.uncertain(frame.timestamp)
+            target = 4-self.verification_progress
+            if detected != target or self.check.ambiguous:
+                self.verification_since = None
+            elif self.verification_since is None:
+                self.verification_since = frame.timestamp
+            elif frame.timestamp-self.verification_since >= 0.18:
+                self.verification_progress += 1
+                self.verification_since = None
+                if self.verification_progress == 5:
+                    self.verification_active = False
+                    self.step += 1
+                    self.recent.clear()
+                    self.message = "Finger press and release verified. Mark a relaxed bowing area."
+            return
         if self.started is None or self.complete:
             return
         hand = frame.hand(self.value.right_label, self.confidence)
@@ -105,7 +152,39 @@ class Calibrator:
             else:
                 speed = sorted(self.speeds)[int(0.80 * (len(self.speeds) - 1))]
                 self.value = replace(self.value, bow_full_speed=max(0.15, min(4.0, speed)))
+                if self.mode == "fingers":
+                    self.value = replace(self.value, fingers=self.candidate_fingers)
                 self.complete = True
+
+    def _stable_finger_features(self, now: float) -> tuple[tuple[float, ...], tuple[float, ...]]:
+        """Use a full pose window and measure noise, rather than three frames."""
+        self._stable_hand(self.value.left_label, now)
+        samples = []
+        stamps = []
+        latest = self.recent[-1].hand(self.value.left_label, self.confidence)
+        if latest is None or any(v is None for v in finger_features(latest)):
+            raise ValueError("All four finger joints must be visible now. Face your palm toward the camera.")
+        for frame in self.recent:
+            if not 0 <= now-frame.timestamp <= 1.15:
+                continue
+            hand = frame.hand(self.value.left_label, self.confidence)
+            features = finger_features(hand) if hand else (None,)*4
+            if any(v is None for v in features):
+                # A fresh image position does not imply fresh metric geometry.
+                # Calibrate from a contiguous valid suffix, never old features
+                # across a missing/degenerate world-landmark result.
+                samples.clear()
+                stamps.clear()
+                continue
+            samples.append(features)
+            stamps.append(frame.timestamp)
+        if len(samples) < 8 or stamps[-1]-stamps[0] < 0.90:
+            raise ValueError("Keep all finger joints visible for one second, then press SPACE.")
+        medians = tuple(statistics.median(values) for values in zip(*samples))
+        noise = tuple(statistics.median(abs(sample[i]-medians[i]) for sample in samples) for i in range(4))
+        if any(value > 0.025 for value in noise):
+            raise ValueError("Finger pose is moving or noisy. Pause gently for one second, then SPACE.")
+        return medians, noise
 
     def _stable_hand(self, label: str | None, now: float) -> Hand:
         valid = []
@@ -145,22 +224,41 @@ class Calibrator:
         label = self.value.left_label if self.step < 8 else self.value.right_label
         hand = self._stable_hand(label, now)
         if 2 <= self.step <= 7:
-            features = finger_features(hand)
-            if any(v is None for v in features):
-                raise ValueError("All four finger joints must be visible. Face your palm toward the camera.")
+            features, noise = self._stable_finger_features(now)
             if self.step == 2:
                 self.lifted = features
+                self.lifted_noise = noise
             elif self.step < 7:
                 index = self.step-3
-                if abs(features[index]-self.lifted[index]) < 0.06:
-                    raise ValueError(f"{FINGER_NAMES[index]} pose is too similar. Bend it more clearly, then SPACE.")
+                separation = abs(features[index]-self.lifted[index])
+                # Demand separation above observed noise without requiring a
+                # large/fatiguing curl: four MADs of the noisier endpoint.
+                minimum = max(0.045, 4*max(noise[index], self.lifted_noise[index]))
+                if separation < minimum:
+                    raise ValueError(f"{FINGER_NAMES[index]} pose is too similar or noisy. Gently lower it at the knuckle, then SPACE.")
+                for lower in range(index):
+                    score = (features[lower]-self.lifted[lower])/(self.pressed[lower]-self.lifted[lower])
+                    if not 0.55 <= score <= 2.2:
+                        raise ValueError(f"Keep {FINGER_NAMES[lower]} down while lowering {FINGER_NAMES[index]}.")
+                for higher in range(index+1, 4):
+                    # These fingers have no pressed calibration yet. Reject a
+                    # fist/all-down capture while allowing small natural coupling.
+                    tolerance = max(0.10, 0.55*separation, 6*(noise[higher]+self.lifted_noise[higher]))
+                    if abs(features[higher]-self.lifted[higher]) > tolerance:
+                        raise ValueError(f"Keep {FINGER_NAMES[higher]} lifted; only the requested and lower fingers should be down.")
                 self.pressed.append(features[index])
+                self.pressed_noise.append(noise[index])
             else:
-                calibration = FingerCalibration(self.lifted, tuple(self.pressed))
+                calibration = FingerCalibration(self.lifted, tuple(self.pressed), feature_version=FINGER_FEATURE_VERSION)
                 scores = [(value-a)/(b-a) for value, a, b in zip(features, calibration.lifted, calibration.pressed)]
-                if any(not -0.75 <= value <= 0.45 for value in scores):
-                    raise ValueError("Lift all four fingers to the original relaxed pose; keep your palm visible.")
-                self.value = replace(self.value, fingers=calibration)
+                if any(not 0.55 <= value <= 2.2 for value in scores):
+                    raise ValueError("Begin the check with all four fingers gently down, then SPACE.")
+                self.candidate_fingers = calibration
+                self.check = Fingering(calibration)
+                self.verification_active = True
+                self.verification_progress = 0
+                self.verification_since = None
+                self.message = "Lift fingers in order to prove notes can change. No bow motion is needed."
         elif self.step == 8:
             point = hand.points[0]
             if not (0 <= point.x <= 1 and 0 <= point.y <= 1):
@@ -187,7 +285,7 @@ class Calibrator:
             self.message = "Sweep now..."
 
     def advance(self, now: float) -> None:
-        if self.started is not None or self.complete:
+        if self.started is not None or self.complete or self.verification_active:
             return
         try:
             if self.step < 2:
@@ -199,7 +297,7 @@ class Calibrator:
                     raise ValueError("Same label as your left hand. Show only your physical RIGHT hand.")
             elif self.mode == "fingers":
                 self._finger_step(now)
-                if self.started is not None:
+                if self.started is not None or self.verification_active:
                     return
             else:
                 label = self.value.left_label if self.step < 4 else self.value.right_label

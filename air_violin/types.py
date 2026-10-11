@@ -88,3 +88,4 @@ class MusicalState:
     finger_states: tuple[int, ...] = ()  # -1 unknown, 0 lifted, 1 pressed-like.
     finger_scores: tuple[float | None, ...] = ()
     fingering_mode: str = "pointing"
+    bow_sustaining: bool = False
