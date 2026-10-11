@@ -58,7 +58,7 @@ class Instrument:
         # Audio has its own watchdog. GUI heartbeat cannot keep old hands alive.
         freshness = min(self.last_left, self.last_right) if gate else now
         audio = AudioState(freshness, midi if midi is not None else self.last_midi,
-                           bow.intensity if gate else 0.0, gate, volume)
+                           bow.intensity if gate else 0.0, gate, volume, bow.direction)
         return MusicalState(audio, self.phase, string, zone, bow.direction,
                             bow.raw_velocity, bow.velocity, bow.pinch, bow.engaged,
                             left_fresh, right_fresh, self.board.point, bow.wrist)

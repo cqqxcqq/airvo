@@ -64,6 +64,7 @@ class AudioState:
     intensity: float = 0.0
     gate: bool = False
     volume: float = 0.65
+    bow_direction: int = 0  # nonzero stroke reversals articulate without restarting pitch
 
 
 @dataclass(frozen=True)

@@ -48,11 +48,13 @@ class Synthesizer:
         self.frequency = 440.0
         self.amplitude = 0.0
         self.rng = np.random.default_rng(seed)
-        self.harmonics = np.arange(1, 13, dtype=np.float64)
-        weights = 1 / self.harmonics ** 1.15
-        weights *= 1 + 0.30 * np.exp(-((self.harmonics - 5) / 2.0) ** 2)
-        # Absolute normalization keeps the harmonic sum within [-1, 1].
-        self.weights = weights / weights.sum()
+        self.harmonics = np.arange(1, 25, dtype=np.float64)
+        self.weights = 1 / self.harmonics ** 1.10
+        self.brightness = 0.0
+        self.stroke_transient = 0.0
+        self.was_bowing = False
+        self.last_direction = 0
+        self.previous_noise = 0.0
 
     def render(self, count: int, state: AudioState, now: float) -> np.ndarray:
         if count <= 0:
@@ -66,18 +68,45 @@ class Synthesizer:
         fresh = 0 <= now - state.timestamp <= self.timeout
         intensity = float(np.clip(state.intensity, 0, 1)) if math.isfinite(state.intensity) else 0.0
         volume = float(np.clip(state.volume, 0, 1)) if math.isfinite(state.volume) else 0.0
-        target_amplitude = 0.65 * volume * intensity if state.gate and fresh and valid_midi else 0.0
+        bowing = state.gate and fresh and valid_midi
+        direction = state.bow_direction if state.bow_direction in (-1, 1) else 0
+        if bowing and not self.was_bowing:
+            self.stroke_transient = .5
+        elif bowing and direction and self.last_direction and direction != self.last_direction:
+            self.stroke_transient = max(self.stroke_transient, .20)
+        if direction and bowing:
+            self.last_direction = direction
+        if not bowing:
+            self.last_direction = 0
+        self.was_bowing = bowing
+        target_amplitude = 0.65 * volume * intensity if bowing else 0.0
         tau = 0.015 if target_amplitude > self.amplitude else 0.065
         envelope = exponential_curve(self.amplitude, target_amplitude, count, tau, self.sample_rate)
         self.amplitude = float(envelope[-1])
+        brightness = exponential_curve(self.brightness, intensity if bowing else 0.0, count, .040, self.sample_rate)
+        self.brightness = float(brightness[-1])
+        transient = exponential_curve(self.stroke_transient, 0., count, .030, self.sample_rate)
+        self.stroke_transient = float(transient[-1])
         output = np.zeros(count, dtype=np.float64)
-        # Skip harmonics above Nyquist throughout a portamento block.
-        highest_frequency = max(float(frequencies.max()), target_frequency)
+        normalization = np.zeros(count, dtype=np.float64)
+        # Helmholtz motion motivates a rich, saw-like harmonic source. Broad
+        # body color and speed-dependent rolloff add character, but these are
+        # designed formants, not measured violin resonances or a friction solver.
+        # Per-sample curves keep the result independent of callback block size.
         for harmonic, weight in zip(self.harmonics, self.weights):
-            if harmonic * highest_frequency < 0.45 * self.sample_rate:
-                output += weight * np.sin(harmonic * phases)
-        friction = self.rng.uniform(-1, 1, count) * 0.012 * intensity
-        return ((output + friction) * envelope).astype(np.float32)
+            partial_frequency = harmonic * frequencies
+            body = (1 + .25 * np.exp(-((partial_frequency - 460) / 240) ** 2)
+                    + .55 * np.exp(-((partial_frequency - 2400) / 950) ** 2))
+            gain = weight * body * np.exp(-(harmonic - 1) / (3 + 14 * brightness))
+            gain *= partial_frequency < .45 * self.sample_rate
+            output += gain * np.sin(harmonic * phases)
+            normalization += gain
+        output /= np.maximum(normalization, 1e-12)
+        white = self.rng.uniform(-1, 1, count)
+        previous = np.concatenate(([self.previous_noise], white[:-1]))
+        self.previous_noise = float(white[-1])
+        friction = (white - previous) * (.003 * brightness + .015 * transient)
+        return ((output * (1 + .08 * transient) + friction) * envelope).astype(np.float32)
 
 
 @dataclass(frozen=True)

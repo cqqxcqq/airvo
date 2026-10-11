@@ -1,3 +1,3 @@
-"""Air Violin Studio: the independently usable playable foundation."""
+"""Air Violin Studio: a playable gesture instrument and visual stage."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

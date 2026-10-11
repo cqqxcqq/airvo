@@ -43,8 +43,9 @@ fi
 .venv/bin/python -c 'import mediapipe, cv2, numpy, sounddevice; print("Desktop dependencies import successfully")'
 .venv/bin/python -m unittest discover -s tests -v
 if [[ "${1:-}" != --skip-model ]]; then
-    .venv/bin/python tools/fetch_model.py
+    .venv/bin/python tools/fetch_model.py --all
     .venv/bin/python tools/validate.py --require-model
+    .venv/bin/python tools/validate_studio.py --require-segmenter
 else
     # Explicit diagnostic option for testing shared prerequisites while network
     # configuration is pending. It does not establish webcam-mode readiness.
