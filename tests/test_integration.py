@@ -13,13 +13,26 @@ from air_violin.audio import AudioEngine, StateBus
 from air_violin.config import Calibration
 from air_violin.demo import KeyboardInstrument
 from air_violin.models import verify_model
-from air_violin.render import Renderer
+from air_violin.render import Renderer, physical_hand_caption
 from air_violin.vision import convert_result
 from tools.fetch_model import fetch_model
 from tests.helpers import hand
 
 
 class IntegrationTests(unittest.TestCase):
+    def test_display_uses_calibrated_physical_identity_in_both_mirror_modes(self):
+        from dataclasses import replace
+        for mirrored in (True, False):
+            calibration = replace(Calibration(), mirrored=mirrored, left_label="Right", right_label="Left")
+            self.assertEqual(physical_hand_caption("Right", calibration), "LEFT / notes")
+            self.assertEqual(physical_hand_caption("Left", calibration), "RIGHT / bow")
+        self.assertEqual(physical_hand_caption("Left", Calibration()), "LEFT / notes")
+        self.assertEqual(physical_hand_caption("Right", Calibration()), "RIGHT / bow")
+
+    def test_unassigned_hand_does_not_display_a_physical_side(self):
+        self.assertEqual(physical_hand_caption("Right", None), "Hand detected")
+        self.assertEqual(physical_hand_caption("Left", None), "Hand detected")
+
     def test_tasks_adapter_preserves_raw_identity_and_capture_timestamp(self):
         source = hand("Right")
         result = SimpleNamespace(hand_landmarks=[source.points],

@@ -9,10 +9,10 @@ from .types import Hand, Point, TrackingFrame
 STEPS = (
     ("Your physical LEFT hand", "Raise only your LEFT hand. Keep the other out of view.", "Press SPACE when its landmarks are stable."),
     ("Your physical RIGHT hand", "Raise only your RIGHT hand. Keep the other out of view.", "Press SPACE to confirm its identity."),
-    ("Fingerboard: top-left", "Move LEFT index tip to a comfortable upper-left corner.", "Press SPACE. The board will span four string bands."),
-    ("Fingerboard: bottom-right", "Move LEFT index tip to the opposite lower-right corner.", "Use a wide, reachable rectangle. Press SPACE."),
-    ("Bowing region: top-left", "Move RIGHT wrist to its comfortable upper-left corner.", "Press SPACE to mark the corner."),
-    ("Bowing region: bottom-right", "Move RIGHT wrist to the opposite lower-right corner.", "Leave room for horizontal strokes. Press SPACE."),
+    ("Fingerboard: first corner", "Move your physical LEFT index tip to any corner of your playing area.", "Press SPACE. Use a comfortable, reachable area."),
+    ("Fingerboard: opposite corner", "Move the SAME index tip diagonally to the opposite corner.", "Either corner order works. Press SPACE."),
+    ("Bowing region: first corner", "Move your physical RIGHT wrist to any corner of your bowing area.", "Press SPACE to mark the first corner."),
+    ("Bowing region: opposite corner", "Move the SAME wrist diagonally to the opposite corner.", "Leave room for horizontal strokes. Press SPACE."),
     ("Precision bow: open hand", "Hold RIGHT thumb and index comfortably apart.", "Press SPACE. Keep your palm facing the camera."),
     ("Precision bow: pinch", "Touch RIGHT thumb and index fingertips gently.", "Press SPACE to set separate on/off thresholds."),
     ("Comfortable bow speed", "Press SPACE, then sweep your RIGHT wrist for 3 seconds.", "Stay inside the bow region and use relaxed strokes."),
@@ -108,10 +108,18 @@ class Calibrator:
                 label = self.value.left_label if self.step < 4 else self.value.right_label
                 hand = self._stable_hand(label, now)
                 if self.step in (2, 4):
-                    self.corner = hand.points[8 if self.step == 2 else 0]
+                    point = hand.points[8 if self.step == 2 else 0]
+                    if not (0 <= point.x <= 1 and 0 <= point.y <= 1):
+                        raise ValueError("Keep the corner inside the camera view, then press SPACE.")
+                    self.corner = point
                 elif self.step in (3, 5):
                     point = hand.points[8 if self.step == 3 else 0]
-                    rect = Rect(self.corner.x, self.corner.y, point.x, point.y)
+                    if not (0 <= point.x <= 1 and 0 <= point.y <= 1):
+                        raise ValueError("Keep the opposite corner inside the camera view, then press SPACE.")
+                    # Screen direction is easy to confuse in a mirrored view.
+                    # Order the bounds, preserving the user's physical-hand binding.
+                    rect = Rect(min(self.corner.x, point.x), min(self.corner.y, point.y),
+                                max(self.corner.x, point.x), max(self.corner.y, point.y))
                     if self.step == 3 and rect.y1 - rect.y0 < 0.24:
                         raise ValueError("Use at least 24% frame height for four comfortable string bands.")
                     self.value = replace(self.value, **{"board" if self.step == 3 else "bow": rect})

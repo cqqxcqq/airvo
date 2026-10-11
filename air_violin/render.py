@@ -26,6 +26,17 @@ def wrapped_text(image, content, x, y, width=30, scale=0.43, color=(218, 225, 23
     return y
 
 
+def physical_hand_caption(raw_label: str, calibration: Calibration | None) -> str:
+    """Resolve the learned physical identity, without a global mirror-dependent swap."""
+    if calibration is None:
+        return "Hand detected"
+    if raw_label == calibration.left_label:
+        return "LEFT / notes"
+    if raw_label == calibration.right_label:
+        return "RIGHT / bow"
+    return "Unidentified hand"
+
+
 class Renderer:
     def __init__(self):
         self.history = deque(maxlen=8)
@@ -96,10 +107,22 @@ class Renderer:
                 for p in hand.points:
                     cv2.circle(canvas, pixel(p.x, p.y), 2, (138, 238, 230), -1)
                 x, y = pixel(hand.points[0].x, hand.points[0].y)
-                text(canvas, f"raw {hand.label} {hand.confidence:.2f}", x, y + 20, 0.45)
+                # Before the user identifies their first hand, do not claim a
+                # physical side. Later use the same binding as gesture controls.
+                binding = wizard.value if wizard.step >= 1 else None
+                caption = physical_hand_caption(hand.label, binding)
+                text(canvas, caption, x, y + 20, 0.45)
             if wizard.corner and wizard.step in (3, 5):
                 cv2.drawMarker(canvas, pixel(wizard.corner.x, wizard.corner.y), (145, 238, 221),
                                cv2.MARKER_CROSS, 20, 2)
+                label = wizard.value.left_label if wizard.step == 3 else wizard.value.right_label
+                target_hand = tracking.hand(label, wizard.confidence)
+                if target_hand:
+                    target = target_hand.points[8 if wizard.step == 3 else 0]
+                    first = pixel(min(wizard.corner.x, target.x), min(wizard.corner.y, target.y))
+                    second = pixel(max(wizard.corner.x, target.x), max(wizard.corner.y, target.y))
+                    cv2.rectangle(canvas, first, second, (145, 238, 221), 2, cv2.LINE_AA)
+                    cv2.circle(canvas, pixel(target.x, target.y), 7, (145, 238, 221), 2)
         if state.audio.gate and (state.audio.midi != self.previous_note or not self.previous_gate):
             self.history.append(note_name(state.audio.midi))
         self.previous_note, self.previous_gate = state.audio.midi, state.audio.gate
@@ -138,6 +161,8 @@ class Renderer:
             title, instruction, action = wizard.instructions
             text(output, f"CALIBRATION {wizard.step + 1}/{len(STEPS)}", 680, 119, 0.43, (172, 224, 212))
             y = wrapped_text(output, title, 680, 164, 22, 0.53)
+            if wizard.step == 0:
+                y = wrapped_text(output, "Hand identity is assigned when you press SPACE.", 680, y + 12, 31, 0.39)
             y = wrapped_text(output, instruction, 680, y + 22)
             y = wrapped_text(output, action, 680, y + 22)
             if wizard.started is not None:

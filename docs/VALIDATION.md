@@ -7,7 +7,7 @@ reports current-instance evidence, not acceptance on a user's laptop.
 | --- | --- |
 | Pinned dependency installation and `pip check` | Passed; no broken requirements |
 | Windows x64 / CPython 3.12 wheel resolution, binary-only | Passed for all 18 pinned packages; no Windows execution claim |
-| Automated unittest suite | **53 passed**, zero skipped or expected failures |
+| Automated unittest suite | **58 passed**, zero skipped or expected failures |
 | Full `bash tools/cloud_setup.sh` | Passed: dependency imports, tests, verified model download, synthetic validation, real Tasks inference |
 | Local PortAudio provisioning | Passed, using signed Debian metadata and package checksums; backend reports **zero devices** |
 | Model provenance/integrity | Official version-1 object size and MD5 matched Google's object metadata; pinned SHA-256 enforced on download and launch |
@@ -50,3 +50,19 @@ validation rendering, not a recording of a user's performance.
 Before Milestone 2, verify physical melody control, comfortable region reach,
 stationary-wrist silence, pinch reliability, device behavior, and responsiveness
 using README's exact manual acceptance tests. No hardware acceptance is claimed.
+
+## Calibration correction
+
+A user screenshot showed swapped raw handedness captions and a rejected second
+bow corner. The overlay now resolves physical LEFT/notes and RIGHT/bow from
+the same learned binding used by the controls. Before identity calibration it
+says "Hand detected". No global label swap or screen-side identity assumption
+was introduced.
+
+Both fingerboard and bow corners are now sorted into normalized rectangles,
+accepting either diagonal order; minimum-size and in-frame checks remain.
+The second-corner step shows a live rectangle. Added regressions cover all four
+diagonal corner orders, both mirror settings, swapped model labels, completing
+the wizard and then playing with those bindings, tiny/out-of-frame rejection,
+and physical versus unassigned captions. Laptop confirmation of the corrected
+wizard remains pending.

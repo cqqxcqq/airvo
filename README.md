@@ -93,19 +93,25 @@ each position after holding still briefly:
 1. Raise **only your physical left hand**. This binds the model's raw label to
    the note hand. It does not infer identity from screen position.
 2. Raise **only your physical right hand** to verify the opposite raw label.
-3. Mark the fingerboard's upper-left corner with your **left index fingertip**.
-4. Mark its lower-right corner. Use at least 15% image width and 24% image height;
+3. Mark any corner of the fingerboard with your **physical left index fingertip**.
+4. Mark the diagonally opposite corner with the same finger. Either corner order
+   is accepted. Use at least 15% image width and 24% image height;
    a larger comfortable board makes notes easier to hit.
-5. Mark the bow box's upper-left corner with your **right wrist**.
-6. Mark its lower-right corner. Give the wrist room for horizontal strokes.
+5. Mark any corner of the bow box with your **physical right wrist**.
+6. Mark its diagonally opposite corner with the same wrist. Give the wrist room
+   for horizontal strokes. Either corner order is accepted.
 7. Hold right thumb and index comfortably apart.
 8. Touch the two fingertips to calibrate Precision Bow's pinch thresholds.
 9. Press Space and sweep your right wrist horizontally for three seconds at a
    comfortable speed. The 80th percentile tracked speed sets full intensity.
 
-The camera remains visible throughout; raw landmarks and the first marked
-corner are shown. Each point uses a short median window. Ambiguous labels,
-stale results, unstable samples, tiny/reversed rectangles, and insufficient
+The camera remains visible throughout; landmarks, calibrated physical hand
+labels, and a live preview between opposite corners are shown. Before the first
+hand is identified, the overlay says "Hand detected". Model classifications are
+not displayed as physical sides: raising your physical left hand in step 1 binds
+it to LEFT/notes, even if the underlying mirrored-input model calls it Right.
+Each point uses a short median window. Ambiguous labels,
+stale results, unstable samples, tiny/out-of-frame rectangles, and insufficient
 sweep motion are rejected with an explanation. **C** restarts calibration.
 
 Calibration is stored as JSON in `%LOCALAPPDATA%\.air-violin-studio` on Windows

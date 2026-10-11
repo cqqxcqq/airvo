@@ -289,6 +289,58 @@ class CalibrationTests(unittest.TestCase):
         wizard.advance(1.22)
         self.assertEqual(wizard.step, 0)
 
+    def test_opposite_corners_in_all_orders_with_swapped_physical_labels(self):
+        corners = [((0.05, 0.2), (0.45, 0.8)), ((0.45, 0.8), (0.05, 0.2)),
+                   ((0.45, 0.2), (0.05, 0.8)), ((0.05, 0.8), (0.45, 0.2))]
+        for mirrored in (True, False):
+            for first, second in corners:
+                with self.subTest(mirrored=mirrored, first=first):
+                    wizard = Calibrator(mirrored)
+                    self.feed(wizard, hand("Right"), 1)  # Physical left.
+                    self.feed(wizard, hand("Left"), 2)   # Physical right.
+                    self.feed(wizard, hand("Right", finger=first), 3)
+                    self.feed(wizard, hand("Right", finger=second), 4)
+                    # Reproduce the screenshot's reversed bow corners.
+                    self.feed(wizard, hand("Left", wrist=(0.86, 0.47)), 5)
+                    self.feed(wizard, hand("Left", wrist=(0.4, 0.82)), 6)
+                    self.assertEqual(wizard.step, 6)
+                    self.assertEqual(wizard.value.board, Rect(0.05, 0.2, 0.45, 0.8))
+                    self.assertEqual(wizard.value.bow, Rect(0.4, 0.47, 0.86, 0.82))
+                    self.assertEqual(wizard.value.left_label, "Right")
+                    self.assertEqual(wizard.value.right_label, "Left")
+                    self.feed(wizard, hand("Left", pinch=1.5), 7)
+                    self.feed(wizard, hand("Left", pinch=0.2), 8)
+                    self.feed(wizard, hand("Left", wrist=(0.65, 0.6)), 9)
+                    for i in range(1, 100):
+                        t = 9.2 + i / 30
+                        h = hand("Left", wrist=(0.63 + 0.14 * math.sin(i / 10), 0.6))
+                        wizard.observe(TrackingFrame(t, (h,)), t)
+                    self.assertTrue(wizard.complete)
+                    inst = Instrument(wizard.value, Controls())
+                    left = hand("Right", finger=(0.09, 0.275))
+                    inst.update(TrackingFrame(20, (left, hand("Left", wrist=(0.6, 0.6)))), 20)
+                    state = inst.update(TrackingFrame(20.04, (left, hand("Left", wrist=(0.65, 0.6)))), 20.04)
+                    self.assertEqual(state.audio.midi, 55)
+                    self.assertTrue(state.audio.gate)
+
+    def test_tiny_region_still_rejected_after_corner_normalization(self):
+        wizard = Calibrator(True)
+        self.feed(wizard, hand("Left"), 1)
+        self.feed(wizard, hand("Right"), 2)
+        self.feed(wizard, hand("Left", finger=(0.3, 0.4)), 3)
+        self.feed(wizard, hand("Left", finger=(0.25, 0.35)), 4)
+        self.assertEqual(wizard.step, 3)
+        self.assertIn("too small", wizard.message)
+
+    def test_first_corner_outside_view_is_not_saved(self):
+        wizard = Calibrator(True)
+        self.feed(wizard, hand("Left"), 1)
+        self.feed(wizard, hand("Right"), 2)
+        self.feed(wizard, hand("Left", finger=(-0.1, 0.4)), 3)
+        self.assertEqual(wizard.step, 2)
+        self.assertIsNone(wizard.corner)
+        self.assertIn("inside the camera view", wizard.message)
+
 
 class DemoTests(unittest.TestCase):
     def test_keyboard_note_string_and_safe_stop(self):
